@@ -46,11 +46,11 @@ pull_exp() {
 }
 
 # Prints one exp dir per line on stdout; stderr for errors. Returns 1 if ssh/path fails.
+# Note: do NOT use BatchMode=yes here — it breaks password / keyboard-interactive logins.
 list_remote_exp_dirs() {
-  if ! ssh -o BatchMode=yes -o ConnectTimeout=15 "${REMOTE_HOST}" \
-    "test -d '${REMOTE_REPO}/runs'" 2>/dev/null; then
-    echo "[pull_models] ERROR: ssh to ${REMOTE_HOST} failed (add SSH keys?) or ${REMOTE_REPO}/runs missing." >&2
-    echo "            Run from a terminal where: ssh ${REMOTE_HOST}  works." >&2
+  if ! ssh -o ConnectTimeout=20 "${REMOTE_HOST}" "test -d '${REMOTE_REPO}/runs'"; then
+    echo "[pull_models] ERROR: cannot reach ${REMOTE_HOST} or ${REMOTE_REPO}/runs does not exist." >&2
+    echo "            Try: ssh ${REMOTE_HOST} 'ls ${REMOTE_REPO}/runs'" >&2
     return 1
   fi
   ssh "${REMOTE_HOST}" "cd '${REMOTE_REPO}/runs' 2>/dev/null && ls -d */ 2>/dev/null | sed 's|/||'"
