@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=nnef-esm-cache
-#SBATCH --partition=gpu_h200         # H200 is fastest for ESM-C 600M fp16.
-                                     # Fall back to `gpu` (A100) if gpu_h200
-                                     # queue is long; both work, A100 is ~1.5x slower.
+# H200 is fastest for ESM-C 600M fp16. If gpu_h200 queue is long or nodes fail, use A100:
+#   change next line to: #SBATCH --partition=gpu
+#SBATCH --partition=gpu_h200
 #SBATCH --gres=gpu:1
+# NVML ERR! / CUDA unknown error on torch.cuda (e.g. 2026-04 holygpu8a12501). Add more if needed.
+#SBATCH --exclude=holygpu8a12501
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G                    # ESM-C 600M fp16 weights ~1.2 GB +
-                                     # activations for L<=1024 -> a few GB max.
-#SBATCH --time=06:00:00              # ~12k chains * ~0.5-1s/chain on H200 -> 1.5-3.5h.
-                                     # Bumped to 6h so long tails don't get killed.
+#SBATCH --mem=32G
+#SBATCH --time=06:00:00
 #SBATCH --output=runs/slurm-%j.out
 #SBATCH --error=runs/slurm-%j.err
 #
