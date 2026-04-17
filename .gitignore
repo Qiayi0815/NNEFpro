@@ -22,6 +22,9 @@ env/
 # --- Notebooks ---
 .ipynb_checkpoints/
 
+# Zhang3DRobot outer bundle (large; keep local only)
+/downloads/
+
 # --- NNEF training artifacts ---
 # Keep run/experiment dirs untracked by default; the checkpoints that matter
 # for the repo (params/exp1/, runs/exp1/, nnef/runs/exp1/) are already staged
