@@ -20,6 +20,7 @@ precompute. You package raw bead/chimeric CSVs into `.h5` on your laptop
 | `train_v1_pure.slurm`      | **v1_pure** baseline: no `--use_` flags, bit-identical to 2022 NNEF.        |
 | `train_v3_full.slurm`      | **v3_full** full stack: cart + offset + ESM-C 600M + phi/psi dihedral.      |
 | `precompute_esm.slurm`     | One-off: ESM-C 600M per-residue cache -> `hhsuite_esm_v2.h5`.               |
+| `sync_code_and_rama_v2_to_cluster.sh` | Laptop: rsync code + v2/rama h5 to FASRC (see script header).        |
 
 ## Ablation matrix
 
