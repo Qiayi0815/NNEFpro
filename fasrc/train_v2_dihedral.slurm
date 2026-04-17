@@ -56,7 +56,7 @@ cd "$SLURM_SUBMIT_DIR"
 mkdir -p runs
 
 "$PY" -u nnef/train_chimeric.py \
-    --exp_id v2_dihedral_${SLURM_JOB_ID} \
+    --exp_id v2_dihedral_rama_v2_${SLURM_JOB_ID} \
     --save_path runs \
     --seq_type residue \
     --residue_type_num 20 \

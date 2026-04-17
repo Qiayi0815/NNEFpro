@@ -4,8 +4,9 @@
 #
 #   bash fasrc/sync_code_and_rama_v2_to_cluster.sh
 #
-# Then SSH in and submit:
-#   cd ~/nnef && sbatch fasrc/train_v1_pure.slurm
+# Then SSH in and submit (pick one):
+#   cd ~/nnef && sbatch fasrc/train_v2_dihedral.slurm   # v2 cart+offset + dihedral + rama
+#   cd ~/nnef && sbatch fasrc/train_v1_pure.slurm # baseline + rama only
 
 set -euo pipefail
 
@@ -50,5 +51,5 @@ rsync -avh --progress \
 echo ""
 echo "Done. On cluster:"
 echo "  ssh ${REMOTE_HOST}"
-echo "  cd ${REMOTE_REPO} && sbatch fasrc/train_v1_pure.slurm"
+echo "  cd ${REMOTE_REPO} && sbatch fasrc/train_v2_dihedral.slurm"
 echo "  squeue -u qzha"
