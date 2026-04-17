@@ -21,6 +21,9 @@ precompute. You package raw bead/chimeric CSVs into `.h5` on your laptop
 | `train_v3_full.slurm`      | **v3_full** full stack: cart + offset + ESM-C 600M + phi/psi dihedral.      |
 | `precompute_esm.slurm`     | One-off: ESM-C 600M per-residue cache -> `hhsuite_esm_v2.h5`.               |
 | `sync_code_and_rama_v2_to_cluster.sh` | Laptop: rsync code + v2/rama h5 to FASRC (see script header).        |
+| `sync_3drobot_decoys_to_cluster.sh`   | Laptop: rsync `nnef/data/decoys/3DRobot_set/` (beads + lists) to Cannon. |
+| `sync_runs_to_cluster.sh`             | Laptop: push selected `runs/<exp>/` checkpoints when cluster lacks them. |
+| `eval_3drobot_batch.slurm`            | Cannon: GPU batch job → `python nnef/scripts/batch_eval_3drobot.py --device cuda`. |
 | `pull_models_from_cluster.sh`       | Laptop: pull `runs/<exp>/` or `--all-final` (every `models/model.pt`). |
 
 ## Ablation matrix
@@ -191,6 +194,49 @@ python nnef/scripts/evaluate_decoys.py \
 > and the dihedral branch contributes zero — harmless but also no gain on
 > that eval. To exercise the v3_full dihedral uplift, re-extract the decoy
 > beads with the updated `extract_beads` (it now emits N and C columns).
+
+### E. Laptop → Cannon: 3DRobot data + checkpoints, then batch eval on GPU
+
+Apple MPS can crash (SIGBUS) on long 3DRobot jobs. Easiest path: **keep preparing
+decoys locally**, **rsync the tree + code + weights**, and **score on an A100**
+with CUDA.
+
+**1) On your laptop** (repo root):
+
+```bash
+cd /Library/Camille/FYP/nnef
+
+# Code + training h5s (if not already current on Cannon)
+bash fasrc/sync_code_and_rama_v2_to_cluster.sh
+
+# Unpacked 3DRobot targets under nnef/data/decoys/3DRobot_set/ (excludes decoy_loss_*)
+bash fasrc/sync_3drobot_decoys_to_cluster.sh
+
+# If those checkpoints live only under ./runs on the laptop, push them:
+bash fasrc/sync_runs_to_cluster.sh
+# or: bash fasrc/sync_runs_to_cluster.sh exp1 v1_pure_6171704
+```
+
+**2) On Cannon**:
+
+```bash
+ssh qzha@login.rc.fas.harvard.edu
+cd /n/home03/qzha/nnef
+sbatch fasrc/eval_3drobot_batch.slurm
+squeue -u qzha
+tail -f runs/slurm-3dr-eval-<JOBID>.out
+```
+
+Summaries appear under `~/nnef/eval/3dr_<run_name>/summary.csv`. Optional one-target
+smoke before the full 200:
+
+```bash
+cd /n/home03/qzha/nnef
+sbatch --export=ALL,EXTRA_ARGS='--targets 1C5EA' fasrc/eval_3drobot_batch.slurm
+```
+
+(`EXTRA_ARGS` is read inside the Slurm script and appended to
+`batch_eval_3drobot.py`.)
 
 ## Partition cheat-sheet
 
