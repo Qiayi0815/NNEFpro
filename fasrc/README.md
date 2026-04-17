@@ -238,6 +238,21 @@ sbatch --export=ALL,EXTRA_ARGS='--targets 1C5EA' fasrc/eval_3drobot_batch.slurm
 (`EXTRA_ARGS` is read inside the Slurm script and appended to
 `batch_eval_3drobot.py`.)
 
+### Yang + v1 + v2 (+ optional v3) on CASP14 + 3DRobot
+
+`fasrc/eval_yang_v1_v2_casp14_3drobot.slurm` runs three checkpoints by default.
+After **`train_v3_full.slurm`** completes, re-submit with **`V3_RUN`** set to the
+new directory (e.g. `runs/v3_full_rama_v2_6223467`) so step (4) runs and the
+merged `comparison.csv` includes v3. Requires **`$DATA_DIR/hhsuite_esm_v2.h5`**.
+
+```bash
+# Still training while squeue shows nnef-v3? Wait until model.pt exists.
+ls runs/v3_full_rama_v2_<JOBID>/models/model.pt
+
+sbatch --export=ALL,V3_RUN=runs/v3_full_rama_v2_<JOBID>,DATA_DIR=$HOME/nnef_data \
+  fasrc/eval_yang_v1_v2_casp14_3drobot.slurm
+```
+
 ## Partition cheat-sheet
 
 | Partition        | Use                                                 |
