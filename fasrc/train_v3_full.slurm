@@ -17,6 +17,7 @@
 #   --use_seq_offset       signed chain-distance embedding for every block position
 #   --use_esm              ESM-C 600M per-residue embeddings, frozen, per-chain
 #                          cached in $DATA_DIR/hhsuite_esm_v2.h5
+#   Rama supervision: same as v1/v2 — coords_rama_loss + $DATA_DIR/hhsuite_rama_v2.h5
 #   --use_dihedral         explicit phi/psi sin/cos 4-d per-residue input. v2's
 #                          local frame only preserves the *central* residue's
 #                          N/CA/C orientation; neighbors are CB-only so real
@@ -83,7 +84,7 @@ cd "$SLURM_SUBMIT_DIR"
 mkdir -p runs
 
 "$PY" -u nnef/train_chimeric.py \
-    --exp_id v3_full_${SLURM_JOB_ID} \
+    --exp_id v3_full_rama_v2_${SLURM_JOB_ID} \
     --save_path runs \
     --seq_type residue \
     --residue_type_num 20 \
