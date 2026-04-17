@@ -509,11 +509,9 @@ class LocalEnergyCE(nn.Module):
 
         z_r = out[:, :, 0:idx1].reshape((N, L, m_r, 3))
         z_angle = out[:, :, idx1:idx2].reshape((N, L, m_angle, 6))
-        z_rama = out[:, :, idx2:idx3].reshape((N, L, m_rama, 6))  # Ramachandran
 
         r_pi = F.softmax(z_r[:, :, :, 0], dim=-1)
         angle_pi = F.softmax(z_angle[:, :, :, 0], dim=-1)
-        rama_pi = F.softmax(z_rama[:, :, :, 0], dim=-1)
 
         r_mu = z_r[:, :, :, 1]
         r_sigma = torch.exp(z_r[:, :, :, 2])
@@ -530,12 +528,22 @@ class LocalEnergyCE(nn.Module):
 
         angle_corr = torch.tanh(z_angle[:, :, :, 5]).clamp(min=-0.99, max=0.99)
 
-        # Ramachandran params
-        rama_mu_phi = z_rama[:, :, :, 1]
-        rama_mu_psi = z_rama[:, :, :, 2]
-        rama_sigma_phi = torch.exp(z_rama[:, :, :, 3])
-        rama_sigma_psi = torch.exp(z_rama[:, :, :, 4])
-        rama_corr = torch.tanh(z_rama[:, :, :, 5]).clamp(min=-0.99, max=0.99)
+        # Ramachandran params (pre-rama checkpoints: m_rama == 0, no slice / no softmax on empty)
+        if m_rama > 0:
+            z_rama = out[:, :, idx2:idx3].reshape((N, L, m_rama, 6))
+            rama_pi = F.softmax(z_rama[:, :, :, 0], dim=-1)
+            rama_mu_phi = z_rama[:, :, :, 1]
+            rama_mu_psi = z_rama[:, :, :, 2]
+            rama_sigma_phi = torch.exp(z_rama[:, :, :, 3])
+            rama_sigma_psi = torch.exp(z_rama[:, :, :, 4])
+            rama_corr = torch.tanh(z_rama[:, :, :, 5]).clamp(min=-0.99, max=0.99)
+        else:
+            rama_pi = out.new_ones((N, L, 1))
+            rama_mu_phi = out.new_zeros((N, L, 1))
+            rama_mu_psi = out.new_zeros((N, L, 1))
+            rama_sigma_phi = out.new_ones((N, L, 1))
+            rama_sigma_psi = out.new_ones((N, L, 1))
+            rama_corr = out.new_zeros((N, L, 1))
 
         return (r_pi, r_mu, r_sigma,
                 angle_pi, angle_mu1, angle_mu2, angle_sigma1, angle_sigma2, angle_corr,
@@ -591,8 +599,8 @@ class LocalEnergyCE(nn.Module):
         if rama_mask is not None:
             rama_mask = rama_mask[:, 1:]  # (N, L-1)
 
-        # --- Rama loss ---
-        if rama is not None:
+        # --- Rama loss (skip for pre-rama checkpoints: m_rama == 0) ---
+        if rama is not None and self.m_rama > 0:
             phi_ram = rama[:, :, 0:1]
             psi_ram = rama[:, :, 1:2]
             phi_rep_r = phi_ram.repeat([1, 1, self.m_rama])

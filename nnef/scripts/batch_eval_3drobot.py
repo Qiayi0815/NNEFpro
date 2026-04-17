@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""Run 3DRobot_set decoy evaluation for every checkpoint under runs/*/models/model.pt.
+"""Run 3DRobot_set decoy evaluation for checkpoints under runs/*/models/model.pt.
 
-Infers architecture flags from the run folder name (must match how you trained).
-Skips smoke / init dirs by default.
+Usage (repo root = parent of the ``nnef`` package)::
 
-Usage (repo root = parent of the ``nnef`` package, same as training)::
+    # Apple Silicon: default device is mps if available, else cuda, else cpu
+    python nnef/scripts/batch_eval_3drobot.py
 
-    cd /path/to/nnef   # e.g. /Library/Camille/FYP/nnef
-    python nnef/scripts/batch_eval_3drobot.py --device cpu
-    python nnef/scripts/batch_eval_3drobot.py --device cuda
+    python nnef/scripts/batch_eval_3drobot.py --device mps
+    python nnef/scripts/batch_eval_3drobot.py --targets 1C5EA   # smoke
 
-v3 models need ``hhsuite_esm_v2.h5``. Set ``--esm_h5`` or env ``NNEF_ESM_H5``;
-if missing, v3 runs are skipped with a warning.
+**Defaults for your workflow**
 
-Then merge summaries::
+- Skips run folders whose names match ``rama`` (case-insensitive) — unfinished rama-v2 jobs.
+- Includes **Yang / README ``runs/exp1``** with ``mixture_rama=0`` (``--mixture_seq 1``, etc.).
+- Other runs use the modern head (``mixture_rama=10``).
+
+v3 needs ``hhsuite_esm_v2.h5`` (``--esm_h5`` or ``NNEF_ESM_H5``); otherwise v3 is skipped.
+
+Compare summaries::
 
     python nnef/scripts/evaluate_decoys.py \\
-        --compare_exps eval/3dr_v1_pure_6171704,eval/3dr_v2_run_6160264,... \\
+        --compare_exps eval/3dr_exp1,eval/3dr_v2_run_6160264,... \\
         --out_dir eval/3dr_comparison"""
 from __future__ import annotations
 
@@ -27,14 +31,23 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Repo root (parent of inner nnef package)
 _PKG = Path(__file__).resolve().parent.parent
 _REPO = _PKG.parent
 if str(_PKG) not in sys.path:
     sys.path.insert(0, str(_PKG))
 
 
-def _common_args(device: str) -> list[str]:
+def _default_device() -> str:
+    import torch
+
+    if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():
+        return 'mps'
+    if torch.cuda.is_available():
+        return 'cuda'
+    return 'cpu'
+
+
+def _modern_common(device: str) -> list[str]:
     return [
         '--seq_type', 'residue',
         '--residue_type_num', '20',
@@ -45,6 +58,7 @@ def _common_args(device: str) -> list[str]:
         '--attn_heads', '4',
         '--mixture_r', '2',
         '--mixture_angle', '3',
+        '--mixture_seq', '1',
         '--mixture_rama', '10',
         '--smooth_gaussian',
         '--smooth_r', '0.3',
@@ -59,10 +73,40 @@ def _common_args(device: str) -> list[str]:
     ]
 
 
+def _yang_exp1_common(device: str) -> list[str]:
+    """README / paper decoy flags (no Ramachandran mixture head)."""
+    return [
+        '--seq_type', 'residue',
+        '--residue_type_num', '20',
+        '--seq_len', '14',
+        '--embed_size', '32',
+        '--dim', '128',
+        '--n_layers', '4',
+        '--attn_heads', '4',
+        '--mixture_r', '2',
+        '--mixture_angle', '3',
+        '--mixture_seq', '1',
+        '--mixture_rama', '0',
+        '--smooth_gaussian',
+        '--smooth_r', '0.3',
+        '--smooth_angle', '45',
+        '--coords_angle_loss_lamda', '1',
+        '--profile_loss_lamda', '10',
+        '--radius_loss_lamda', '1',
+        '--start_id_loss_lamda', '1',
+        '--res_counts_loss_lamda', '1',
+        '--coords_rama_loss_lamda', '0',
+        '--use_position_weights',
+        '--cen_seg_loss_lamda', '1',
+        '--oth_seg_loss_lamda', '3',
+        '--device', device,
+    ]
+
+
 def classify_run(name: str) -> str:
     n = name.lower()
     if n == 'exp1':
-        return 'v1_pure'
+        return 'yang_exp1'
     if 'v3_full' in n or re.match(r'^v3_', n):
         return 'v3'
     if 'v2_dihedral' in n or 'v2-dihedral' in n:
@@ -77,29 +121,27 @@ def classify_run(name: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--runs_dir', type=Path, default=_REPO / 'runs')
-    ap.add_argument('--device', type=str, default='cpu')
     ap.add_argument(
-        '--esm_h5',
-        type=str,
-        default='',
-        help='hhsuite_esm_v2.h5 for v3; default: NNEF_ESM_H5 env, else nnef/data path if present',
+        '--device', type=str, default='',
+        help='mps | cuda | cpu (default: auto)',
     )
-    ap.add_argument(
-        '--decoy_sets', type=str, default='3DRobot_set',
-        help='Passed to evaluate_decoys (comma-separated)',
-    )
-    ap.add_argument('--targets', type=str, default='', help='Optional subset for quick tests')
+    ap.add_argument('--esm_h5', type=str, default='', help='hhsuite_esm_v2.h5 for v3')
+    ap.add_argument('--decoy_sets', type=str, default='3DRobot_set')
+    ap.add_argument('--targets', type=str, default='')
     ap.add_argument('--plot', action='store_true')
     ap.add_argument(
         '--skip_pattern',
         type=str,
-        default=r'(gpu_smoke|eval_|init_checkpoint|^exp1$|^_|\.)',
-        help='Regex against run folder name; skip if match (exp1 = legacy ckpt dims)',
+        default=r'(gpu_smoke|eval_|init_checkpoint|rama|^_|\.)',
+        help='Regex; skip if match (default also skips *rama* runs)',
     )
     args = ap.parse_args()
 
+    device = args.device.strip() or _default_device()
+    print(f'[batch_3dr] device={device}')
+
     runs_dir: Path = args.runs_dir.resolve()
-    skip_re = re.compile(args.skip_pattern)
+    skip_re = re.compile(args.skip_pattern, re.IGNORECASE)
     esm_path = (args.esm_h5 or os.environ.get('NNEF_ESM_H5', '')).strip()
     if not esm_path:
         from paths import data_path as _dp  # noqa: E402
@@ -151,7 +193,11 @@ def main() -> int:
             cmd.extend(['--targets', args.targets])
         if args.plot:
             cmd.append('--plot')
-        cmd.extend(_common_args(args.device))
+
+        if kind == 'yang_exp1':
+            cmd.extend(_yang_exp1_common(device))
+        else:
+            cmd.extend(_modern_common(device))
 
         if kind == 'v1_pure':
             pass
@@ -177,7 +223,7 @@ def main() -> int:
         else:
             print(f'[batch_3dr] OK -> {out_dir / "summary.csv"}')
 
-    print('\n[batch_3dr] Compare (edit paths to those that succeeded):')
+    print('\n[batch_3dr] Compare (edit to successful dirs):')
     parts = ','.join(str(out_eval / f'3dr_{exp}') for exp, _ in exps)
     print(f'  python nnef/scripts/evaluate_decoys.py --compare_exps {parts} --out_dir eval/3dr_all_compare')
     return 0
