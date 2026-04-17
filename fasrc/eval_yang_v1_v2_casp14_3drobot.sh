@@ -74,7 +74,9 @@ TAG_V1="${TAG_V1:-v1_pure_ckpt}"
 OUT_V2="${OUT_V2:-eval/v2_run_casp14_3drobot}"
 TAG_V2="${TAG_V2:-v2_cart_offset_ckpt}"
 
-# Optional v3: leave empty to skip. Example: runs/v3_full_rama_v2_6223467
+# Optional v3: leave empty to skip.
+#   train_v3_full.slurm -> runs/v3_full_rama_v2_<JOBID>
+#   no-Rama / custom exp_id v3_full_$JOBID -> runs/v3_full_<JOBID>  (e.g. v3_full_6223467)
 V3_RUN="${V3_RUN:-}"
 DATA_DIR="${DATA_DIR:-$HOME/nnef_data}"
 ESM_H5="${ESM_H5:-$DATA_DIR/hhsuite_esm_v2.h5}"
@@ -214,7 +216,9 @@ if [[ -n "$V3_RUN" ]]; then
     COMPARE_EXPS="$COMPARE_EXPS,$OUT_V3"
   fi
 else
-  echo "[eval] Skip v3 (V3_RUN unset). To include: V3_RUN=runs/v3_full_rama_v2_<JOBID> bash $0"
+  echo "[eval] Skip v3 (V3_RUN unset). To include, e.g.:"
+  echo "        V3_RUN=runs/v3_full_rama_v2_<JOBID> bash $0"
+  echo "        V3_RUN=runs/v3_full_<JOBID> bash $0"
 fi
 
 echo "========== Compare summaries =========="

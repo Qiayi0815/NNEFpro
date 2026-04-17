@@ -19,8 +19,10 @@
 #   V1_RUN=runs/v1_pure_6171704 V2_RUN=runs/v2_run_6160264 sbatch fasrc/...
 #   YANG_CKPT=$HOME/nnef/params/exp1/models/model.pt sbatch fasrc/...
 #
-# After v3_full training finishes (runs/v3_full_rama_v2_<JOBID>/models/model.pt exists):
-#   V3_RUN=runs/v3_full_rama_v2_6223467 DATA_DIR=$HOME/nnef_data sbatch fasrc/eval_yang_v1_v2_casp14_3drobot.slurm
+# After v3 training finishes (model.pt exists), e.g.:
+#   V3_RUN=runs/v3_full_rama_v2_<JOBID>   # from train_v3_full.slurm
+#   V3_RUN=runs/v3_full_6223467          # no-Rama v3 uses exp_id v3_full_$SLURM_JOB_ID
+#   sbatch --export=ALL,V3_RUN=runs/v3_full_6223467,DATA_DIR=$HOME/nnef_data fasrc/eval_yang_v1_v2_casp14_3drobot.slurm
 # Requires $DATA_DIR/hhsuite_esm_v2.h5 (same as train_v3_full.slurm).
 #
 # Logs: runs/slurm-eval-yang-v1-v2-<JOBID>.out (stdout+stderr; PYTHONUNBUFFERED set before import torch).

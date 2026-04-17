@@ -247,9 +247,10 @@ merged `comparison.csv` includes v3. Requires **`$DATA_DIR/hhsuite_esm_v2.h5`**.
 
 ```bash
 # Still training while squeue shows nnef-v3? Wait until model.pt exists.
-ls runs/v3_full_rama_v2_<JOBID>/models/model.pt
+ls runs/v3_full_rama_v2_<JOBID>/models/model.pt   # default train_v3_full.slurm exp_id
+ls runs/v3_full_<JOBID>/models/model.pt            # e.g. no-Rama v3: v3_full_6223467
 
-sbatch --export=ALL,V3_RUN=runs/v3_full_rama_v2_<JOBID>,DATA_DIR=$HOME/nnef_data \
+sbatch --export=ALL,V3_RUN=runs/v3_full_6223467,DATA_DIR=$HOME/nnef_data \
   fasrc/eval_yang_v1_v2_casp14_3drobot.slurm
 ```
 
