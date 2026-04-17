@@ -22,6 +22,39 @@ import pandas as pd
 from paths import data_path
 
 
+def _topk_neighbor_g_local_mps_safe(
+    distance: torch.Tensor,
+    g_others: torch.Tensor,
+    g_seg: torch.Tensor,
+    k: int,
+    num: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Compute ordered neighbor indices for get_local_struct on CPU, then move to device.
+
+    PyTorch MPS can raise SIGBUS on int64 ``sort`` / ``argsort`` (see warnings around
+    top-k neighbor reordering). CPU indexing matches CUDA/CPU numerically for these ops.
+    """
+    d_cpu = distance.detach().cpu()
+    go_cpu = g_others.detach().cpu()
+    gs_cpu = g_seg.detach().cpu()
+    topk_dist, topk_arg = torch.topk(d_cpu, k, dim=1, largest=False, sorted=True)
+    g_topk = torch.gather(go_cpu, dim=1, index=topk_arg)
+    g_topk_sorted, g_topk_sort_arg = torch.sort(g_topk, dim=-1)
+    dist_topk_sorted = torch.gather(topk_dist, dim=1, index=g_topk_sort_arg)
+    g_topk_diff = g_topk_sorted[:, None, :] - g_topk_sorted[:, :, None]
+    g_mask_ref = torch.arange(k, dtype=torch.long)
+    g_mask_ref = g_mask_ref - g_mask_ref[:, None]
+    g_mask = torch.zeros(g_topk_sorted.size(0), k, k)
+    g_mask[g_topk_diff == g_mask_ref] = 1
+    dist_masked = dist_topk_sorted[:, None, :] * g_mask
+    dist_topk_mean = torch.sum(dist_masked, dim=-1) / torch.sum(g_mask, dim=-1)
+    dist_gnum_topk = (dist_topk_mean * 10 ** 6).long() * num + g_topk_sorted
+    dist_gnum_topk_arg = torch.argsort(dist_gnum_topk, dim=-1)
+    gnum_dist_topk_sorted = torch.gather(g_topk_sorted, dim=1, index=dist_gnum_topk_arg)
+    return torch.cat((gs_cpu, gnum_dist_topk_sorted), dim=1).to(device)
+
+
 class EnergyFun(nn.Module):
     def __init__(self, model, args, residue_sum=False, return_loss_terms=False):
         super().__init__()
@@ -397,31 +430,35 @@ class Protein(ProteinBase):
         res_counts = torch.cat([count_8a[:, None], count_10a[:, None], count_12a[:, None]], dim=-1)  # (N-4, 3)
 
         if self.k > 0:
-            # calculate the index of the nearest k neighbors
-            topk_dist, topk_arg = torch.topk(distance, self.k, dim=1, largest=False, sorted=True)  # topk_arg size (N-4, k)
-            g_topk = torch.gather(g_others, dim=1, index=topk_arg)  # (N-4, k)
+            if device.type == 'mps':
+                g_local = _topk_neighbor_g_local_mps_safe(
+                    distance, g_others, g_seg, self.k, num, device)
+            else:
+                # calculate the index of the nearest k neighbors
+                topk_dist, topk_arg = torch.topk(distance, self.k, dim=1, largest=False, sorted=True)  # topk_arg size (N-4, k)
+                g_topk = torch.gather(g_others, dim=1, index=topk_arg)  # (N-4, k)
 
-            # re-order the topk index, g_topk and topk_dist is the group num and dist of the topk residues.
-            g_topk_sorted, g_topk_sort_arg = torch.sort(g_topk, dim=-1)  # sort by group number
-            # reorder dist_topk, so dist_topk_sorted is the distance sorted by group number
-            dist_topk_sorted = torch.gather(topk_dist, dim=1, index=g_topk_sort_arg)
-            # make a mask for each segment g_mask (N-4, k, k)
-            g_topk_diff = g_topk_sorted[:, None, :] - g_topk_sorted[:, :, None]
-            g_mask_ref = torch.arange(self.k, device=device)
-            g_mask_ref = g_mask_ref - g_mask_ref[:, None]
-            g_mask = torch.zeros(g_topk_sorted.size(0), self.k, self.k, device=device)
-            g_mask[g_topk_diff == g_mask_ref] = 1
-            # calculate the mean distance of each segment
-            dist_masked = dist_topk_sorted[:, None, :] * g_mask
-            dist_topk_mean = torch.sum(dist_masked, dim=-1) / torch.sum(g_mask, dim=-1)
-            # reorder the groups by the segment distance and group number.
-            dist_gnum_topk = (dist_topk_mean * 10 ** 6).long() * num + g_topk_sorted
-            dist_gnum_topk_arg = torch.argsort(dist_gnum_topk, dim=-1)
-            gnum_dist_topk_sorted = torch.gather(g_topk_sorted, dim=1, index=dist_gnum_topk_arg)
+                # re-order the topk index, g_topk and topk_dist is the group num and dist of the topk residues.
+                g_topk_sorted, g_topk_sort_arg = torch.sort(g_topk, dim=-1)  # sort by group number
+                # reorder dist_topk, so dist_topk_sorted is the distance sorted by group number
+                dist_topk_sorted = torch.gather(topk_dist, dim=1, index=g_topk_sort_arg)
+                # make a mask for each segment g_mask (N-4, k, k)
+                g_topk_diff = g_topk_sorted[:, None, :] - g_topk_sorted[:, :, None]
+                g_mask_ref = torch.arange(self.k, device=device)
+                g_mask_ref = g_mask_ref - g_mask_ref[:, None]
+                g_mask = torch.zeros(g_topk_sorted.size(0), self.k, self.k, device=device)
+                g_mask[g_topk_diff == g_mask_ref] = 1
+                # calculate the mean distance of each segment
+                dist_masked = dist_topk_sorted[:, None, :] * g_mask
+                dist_topk_mean = torch.sum(dist_masked, dim=-1) / torch.sum(g_mask, dim=-1)
+                # reorder the groups by the segment distance and group number.
+                dist_gnum_topk = (dist_topk_mean * 10 ** 6).long() * num + g_topk_sorted
+                dist_gnum_topk_arg = torch.argsort(dist_gnum_topk, dim=-1)
+                gnum_dist_topk_sorted = torch.gather(g_topk_sorted, dim=1, index=dist_gnum_topk_arg)
 
-            # concat the index of the central segment and the k neighbors
-            # g_local = torch.cat((g_seg, g_topk), dim=1)  # (N-4, 5+k)
-            g_local = torch.cat((g_seg, gnum_dist_topk_sorted), dim=1)  # (N-4, 5+k)
+                # concat the index of the central segment and the k neighbors
+                # g_local = torch.cat((g_seg, g_topk), dim=1)  # (N-4, 5+k)
+                g_local = torch.cat((g_seg, gnum_dist_topk_sorted), dim=1)  # (N-4, 5+k)
         else:
             g_local = g_seg
         # extract the profile and coordinates using the index
@@ -592,16 +629,18 @@ class Protein(ProteinBase):
         distance = torch.norm(coords_others, dim=-1)  # (N-4, N-5)
 
         # calculate the index of the nearest k neighbors
-        topk_dist, topk_arg = torch.topk(distance, self.k, dim=1, largest=False, sorted=True)  # topk_arg size (N-4, k)
-        g_topk = torch.gather(g_others, dim=1, index=topk_arg)  # (N-4, k)
+        if device.type == 'mps':
+            topk_dist, topk_arg = torch.topk(
+                distance.detach().cpu(), self.k, dim=1, largest=False, sorted=True)
+            g_topk = torch.gather(g_others.detach().cpu(), dim=1, index=topk_arg)
+            g_topk_sorted, _ = torch.sort(g_topk, dim=-1)
+            g_local = torch.cat((g_seg.detach().cpu(), g_topk_sorted), dim=1).to(device)
+        else:
+            topk_dist, topk_arg = torch.topk(distance, self.k, dim=1, largest=False, sorted=True)  # topk_arg size (N-4, k)
+            g_topk = torch.gather(g_others, dim=1, index=topk_arg)  # (N-4, k)
+            g_topk_sorted, _ = torch.sort(g_topk, dim=-1)  # sort by group number
+            g_local = torch.cat((g_seg, g_topk_sorted), dim=1)  # (N-4, 5+k)
 
-        # re-order the topk index, g_topk is the group num of the topk residues.
-        g_topk_sorted, _ = torch.sort(g_topk, dim=-1)  # sort by group number
-
-        # concat the index of the central segment and the k neighbors
-        g_local = torch.cat((g_seg, g_topk_sorted), dim=1)  # (N-4, 5+k)
-
-        # extract the profile and coordinates using the index
         profile_local = group_profile[g_local]  # (N-4, 5+k, E)
         coords_local = group_coords[g_local] - group_coords[gc][:, None, :]  # (N-4, 5+k, 3)
 
@@ -727,29 +766,32 @@ class ProteinComplex(ProteinBase):
         res_counts = torch.cat([count_8a[:, None], count_10a[:, None], count_12a[:, None]], dim=-1)  # (N-4, 3)
 
         # calculate the index of the nearest k neighbors
-        topk_dist, topk_arg = torch.topk(distance, self.k, dim=1, largest=False, sorted=True)  # topk_arg size (N-4, k)
-        g_topk = torch.gather(g_others, dim=1, index=topk_arg)  # (N-4, k)
+        if device.type == 'mps':
+            g_local = _topk_neighbor_g_local_mps_safe(
+                distance, g_others, g_seg, self.k, num, device)
+        else:
+            topk_dist, topk_arg = torch.topk(distance, self.k, dim=1, largest=False, sorted=True)  # topk_arg size (N-4, k)
+            g_topk = torch.gather(g_others, dim=1, index=topk_arg)  # (N-4, k)
 
-        # re-order the topk index, g_topk and topk_dist is the group num and dist of the topk residues.
-        g_topk_sorted, g_topk_sort_arg = torch.sort(g_topk, dim=-1)  # sort by group number
-        dist_topk_sorted = torch.gather(topk_dist, dim=1, index=g_topk_sort_arg)  # reorder dist_topk
+            # re-order the topk index, g_topk and topk_dist is the group num and dist of the topk residues.
+            g_topk_sorted, g_topk_sort_arg = torch.sort(g_topk, dim=-1)  # sort by group number
+            dist_topk_sorted = torch.gather(topk_dist, dim=1, index=g_topk_sort_arg)  # reorder dist_topk
 
-        g_topk_diff = g_topk_sorted[:, None, :] - g_topk_sorted[:, :, None]
-        g_mask_ref = torch.arange(self.k, device=device)
-        g_mask_ref = g_mask_ref - g_mask_ref[:, None]
-        g_mask = torch.zeros(g_topk_sorted.size(0), self.k, self.k, device=device)
-        g_mask[g_topk_diff == g_mask_ref] = 1
+            g_topk_diff = g_topk_sorted[:, None, :] - g_topk_sorted[:, :, None]
+            g_mask_ref = torch.arange(self.k, device=device)
+            g_mask_ref = g_mask_ref - g_mask_ref[:, None]
+            g_mask = torch.zeros(g_topk_sorted.size(0), self.k, self.k, device=device)
+            g_mask[g_topk_diff == g_mask_ref] = 1
 
-        dist_masked = dist_topk_sorted[:, None, :] * g_mask
-        dist_topk_mean = torch.sum(dist_masked, dim=-1) / torch.sum(g_mask, dim=-1)
+            dist_masked = dist_topk_sorted[:, None, :] * g_mask
+            dist_topk_mean = torch.sum(dist_masked, dim=-1) / torch.sum(g_mask, dim=-1)
 
-        dist_gnum_topk = (dist_topk_mean * 10 ** 6).long() * num + g_topk_sorted
-        dist_gnum_topk_arg = torch.argsort(dist_gnum_topk, dim=-1)
-        gnum_dist_topk_sorted = torch.gather(g_topk_sorted, dim=1, index=dist_gnum_topk_arg)
+            dist_gnum_topk = (dist_topk_mean * 10 ** 6).long() * num + g_topk_sorted
+            dist_gnum_topk_arg = torch.argsort(dist_gnum_topk, dim=-1)
+            gnum_dist_topk_sorted = torch.gather(g_topk_sorted, dim=1, index=dist_gnum_topk_arg)
 
-        # concat the index of the central segment and the k neighbors
-        # g_local = torch.cat((g_seg, g_topk), dim=1)  # (N-4, 5+k)
-        g_local = torch.cat((g_seg, gnum_dist_topk_sorted), dim=1)  # (N-4, 5+k)
+            # g_local = torch.cat((g_seg, g_topk), dim=1)  # (N-4, 5+k)
+            g_local = torch.cat((g_seg, gnum_dist_topk_sorted), dim=1)  # (N-4, 5+k)
 
         # extract the profile and coordinates using the index
         profile_local = group_profile[g_local]  # (N-4, 5+k, E)
