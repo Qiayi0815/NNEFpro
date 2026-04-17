@@ -169,15 +169,25 @@ class ESMEmbedder:
             from esm.sdk.api import ESMProtein, LogitsConfig
             protein = ESMProtein(sequence=seq)
             tok = self.client.encode(protein)
-            # encode -> Tensor of shape (L+2,) with BOS/EOS already added.
-            if tok.dim() == 1:
-                tok = tok.unsqueeze(0)
-            tok = tok.to(self.device)
+            # New `esm`: `encode` returns ``ESMProteinTensor`` (no ``.dim()``).
+            # Older builds might return a raw token tensor — keep both paths.
+            if isinstance(tok, torch.Tensor):
+                if tok.dim() == 1:
+                    tok = tok.unsqueeze(0)
+                tok = tok.to(self.device)
+            else:
+                tok = tok.to(self.device)
             out = self.client.logits(
-                tok, LogitsConfig(sequence=True, return_embeddings=True),
+                tok,
+                LogitsConfig(sequence=True, return_embeddings=True),
             )
-            # out.embeddings: (1, L+2, d_esm)
-            emb = out.embeddings[0, 1:-1]           # strip BOS / EOS
+            if out.embeddings is None:
+                raise RuntimeError(
+                    'ESMC logits returned no embeddings; check LogitsConfig '
+                    'and esm package version.',
+                )
+            # Typical shape: (1, L+2, d_esm) with BOS/EOS.
+            emb = out.embeddings[0, 1:-1]
         else:  # esm2
             data = [('query', seq)]
             _, _, batch_tokens = self._fair_batch_converter(data)
