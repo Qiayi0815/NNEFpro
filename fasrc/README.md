@@ -21,7 +21,7 @@ precompute. You package raw bead/chimeric CSVs into `.h5` on your laptop
 | `train_v3_full.slurm`      | **v3_full** full stack: cart + offset + ESM-C 600M + phi/psi dihedral.      |
 | `precompute_esm.slurm`     | One-off: ESM-C 600M per-residue cache -> `hhsuite_esm_v2.h5`.               |
 | `sync_code_and_rama_v2_to_cluster.sh` | Laptop: rsync code + v2/rama h5 to FASRC (see script header).        |
-| `pull_models_from_cluster.sh`       | Laptop: rsync `runs/<exp_id>/` (or `models/` only) from FASRC.       |
+| `pull_models_from_cluster.sh`       | Laptop: pull `runs/<exp>/` or `--all-final` (every `models/model.pt`). |
 
 ## Ablation matrix
 
