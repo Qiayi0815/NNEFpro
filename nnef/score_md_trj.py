@@ -1,12 +1,12 @@
 import numpy as np
 import pandas as pd
 import torch
-from physics.protein_os import Protein
+from nnef.protein_os import Protein
 import options
-import os
 from tqdm import tqdm
 import mdtraj as md
 from utils import test_setup, load_protein_bead
+from paths import data_path
 
 
 #################################################
@@ -19,7 +19,7 @@ torch.set_grad_enabled(False)
 
 
 #################################################
-amino_acids = pd.read_csv('data/amino_acids.csv')
+amino_acids = pd.read_csv(data_path('amino_acids.csv'))
 vocab = {x.upper(): y - 1 for x, y in zip(amino_acids.AA3C, amino_acids.idx)}
 
 

@@ -3,6 +3,8 @@ from tqdm import tqdm
 import torch
 import pandas as pd
 
+from paths import data_path
+
 
 class GradMinimizerBase():
     def __init__(self, energy_fn, protein, num_steps=1000, log_interval=10):
@@ -225,7 +227,7 @@ class GradMinimizerProfile():
         self.params = {"lr": 1e-2, "momentum": 0.9}
 
         profile_tr = self.protein.profile
-        df = pd.read_csv('data/aa_freq.csv')
+        df = pd.read_csv(data_path('aa_freq.csv'))
         aa_freq = df['freq'].values / df['freq'].sum()
         self.aa_freq = torch.tensor(aa_freq, dtype=torch.float, device=profile_tr.device)
 

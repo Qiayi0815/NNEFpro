@@ -2,6 +2,8 @@ import numpy as np
 import h5py
 import torch
 
+from paths import data_path
+
 
 def rotate_coords(coords, i):
     """
@@ -30,7 +32,7 @@ def rotate_coords(coords, i):
 class SampleICNext():
     def __init__(self, mode, ic_move_std=2):
         self.mode = mode
-        data_c_next = h5py.File(f'data/training_30_{mode}_c-next_sample.h5', 'r')
+        data_c_next = h5py.File(data_path(f'training_30_{mode}_c-next_sample.h5'), 'r')
         self.c_next_sample = torch.tensor(data_c_next['coords_internal'][()])
         self.ic_move_std = ic_move_std
 

@@ -6,6 +6,7 @@ import os
 
 
 def extract_beads(pdb_id):
+    # 这段代码主要用于处理蛋白质结构文件（PDB文件），提取特定原子的坐标信息，并比较两个蛋白质结构之间的氨基酸突变情况。
     # pdb_id = 'wtf'
     amino_acids = pd.read_csv('data/amino_acids.csv')
     vocab_aa = [x.upper() for x in amino_acids.AA3C]

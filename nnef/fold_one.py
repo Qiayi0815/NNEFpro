@@ -1,13 +1,11 @@
-import numpy as np
-import pandas as pd
-import torch
-from physics.protein_os import Protein
+from nnef.protein_os import Protein
 import options
-from utils import write_pdb, write_pdb_sample2, transform_profile, test_setup, load_protein_pdb
+from utils import write_pdb_sample2, test_setup, load_protein_pdb
 from physics.anneal import AnnealCoords, AnnealFrag
 # from physics.move import SampleICNext
 from physics.grad_minimizer import *
 from physics.dynamics import *
+from paths import data_path
 import os
 import mdtraj as md
 import h5py
@@ -67,7 +65,7 @@ if fold_engine == 'anneal':
         annealer = AnnealCoords(energy_fn, protein, mode=mode, ic_move_std=args.ic_move_std,
                                 T_max=args.T_max, T_min=args.T_min, L=args.L)
     elif args.anneal_type == 'frag':
-        frag_file = h5py.File(f'data/fragment/{pdb_id}/{pdb_id}_int.h5', 'r')
+        frag_file = h5py.File(data_path('fragment', pdb_id, f'{pdb_id}_int.h5'), 'r')
         query_pos = torch.tensor(frag_file['query_pos'][()], device=device)
         frag_int = torch.tensor(frag_file['coords_int'][()], device=device)
         annealer = AnnealFrag(energy_fn, protein, frag=(query_pos, frag_int), use_rg=args.use_rg,

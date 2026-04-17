@@ -3,8 +3,11 @@ import numpy as np
 from tqdm import tqdm
 
 
-df = pd.read_csv('cath-b-newest-all-2020.08.12.txt', sep='\s+', header=None,
+df = pd.read_csv('../data/cath-b-newest-all', sep='\s+', header=None,
                  names=['pdb', 'flag', 'cath', 'boundary'])
+
+# df = df[df['pdb'].str[-3] == 'A']
+# print(df)
 pdb = df['pdb'].apply(lambda x: x[:-2])
 cath = df['cath']
 cat = df['cath'].apply(lambda x: '.'.join(x.split('.')[0:3]))
@@ -14,9 +17,12 @@ pdb_cath_dict = {}
 cat_pdb_dict = {}
 cath_pdb_dict = {}
 
+# Creating Dictionaries for Mapping
 for i in tqdm(range(pdb.shape[0])):
+    # Maps each pdb identifier to a list of corresponding CATH classifications (full).
     pdb_cat_dict.setdefault(pdb[i], [])
     pdb_cat_dict[pdb[i]].append(cat[i])
+    # Maps each pdb identifier to a list of CATH classes (only the first three parts of cath).
     pdb_cath_dict.setdefault(pdb[i], [])
     pdb_cath_dict[pdb[i]].append(cath[i])
 
@@ -24,10 +30,13 @@ for i in tqdm(range(pdb.shape[0])):
     cat_pdb_dict[cat[i]].append(pdb[i])
     cath_pdb_dict.setdefault(cath[i], [])
     cath_pdb_dict[cath[i]].append(pdb[i])
+    # print(cath_pdb_dict) #'3.10.10.10': ['1bqmA', '1bqmB', '1bqnA', '1bqnB']
+    # print(cat_pdb_dict) # '1.10.490': ['101mA', '102mA', '103mA',...]
 
 
 # partition train and test on the level of Class
-df = pd.read_csv('hhsuite_CB_pdb_list_cullpdb.csv')
+df = pd.read_csv('../data/hhsuite_CB_pdb_list.csv')
+df.to_csv(f'../data/hhsuite_CB_pdb_list_cullpdb.csv', index=False)
 pdb_list = df['pdb'].values
 
 idx = np.zeros(df.shape[0])

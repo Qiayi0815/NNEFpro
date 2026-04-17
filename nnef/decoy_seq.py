@@ -1,12 +1,12 @@
 import os
 import torch
-import torch.nn as nn
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import options
-from physics.protein_os import Protein
+from nnef.protein_os import Protein
 from utils import test_setup
+from paths import data_path, ensure_dir
 
 parser = options.get_decoy_parser()
 args = options.parse_args_and_arch(parser)
@@ -30,7 +30,7 @@ torch.set_grad_enabled(False)
 
 #################################################
 def load_protein(pdb_id, mode, device, args):
-    amino_acids = pd.read_csv('data/amino_acids.csv')
+    amino_acids = pd.read_csv(data_path('amino_acids.csv'))
     vocab = {x.upper(): y - 1 for x, y in zip(amino_acids.AA3C, amino_acids.idx)}
 
     df_beads = pd.read_csv(f'../hhsuite/hhsuite_beads/hhsuite/{pdb_id}_bead.csv')
@@ -54,13 +54,12 @@ def load_protein(pdb_id, mode, device, args):
 decoy_flag = args.decoy_set
 decoy_loss_dir = args.decoy_loss_dir
 
-if not os.path.exists(f'data/decoys/decoys_seq/{decoy_loss_dir}'):
-    os.system(f'mkdir -p data/decoys/decoys_seq/{decoy_loss_dir}')
+ensure_dir(data_path('decoys', 'decoys_seq', decoy_loss_dir))
 
-protein_sample = pd.read_csv('data/decoys/decoys_seq/hhsuite_CB_cullpdb_val_no_missing_residue_sample.csv')
+protein_sample = pd.read_csv(data_path('decoys', 'decoys_seq', 'hhsuite_CB_cullpdb_val_no_missing_residue_sample.csv'))
 pdb_list = protein_sample['pdb'].values
 
-amino_acids = pd.read_csv('data/amino_acids.csv')
+amino_acids = pd.read_csv(data_path('amino_acids.csv'))
 vocab = {x: y - 1 for x, y in zip(amino_acids.AA, amino_acids.idx)}
 
 loss_native = []
@@ -75,7 +74,7 @@ for pdb_id in tqdm(pdb_list):
         for i in range(20):
             fake_seq.append(amino_acids.AA.values[i] * len(seq))
     else:
-        fake_seq = pd.read_csv(f'data/decoys/decoys_seq/{pdb_id}_seq_{decoy_flag}.csv')['seq'].values
+        fake_seq = pd.read_csv(data_path('decoys', 'decoys_seq', f'{pdb_id}_seq_{decoy_flag}.csv'))['seq'].values
 
     loss_all = []
     if decoy_flag == 'type2LD':
@@ -93,8 +92,8 @@ for pdb_id in tqdm(pdb_list):
         df = pd.DataFrame({'AA': amino_acids.AA, 'loss': loss_all})
     else:
         df = pd.DataFrame({'loss': loss_all})
-    df.to_csv(f'data/decoys/decoys_seq/{decoy_loss_dir}/{pdb_id}_{decoy_flag}_loss.csv', index=False)
+    df.to_csv(data_path('decoys', 'decoys_seq', decoy_loss_dir, f'{pdb_id}_{decoy_flag}_loss.csv'), index=False)
 
 df = pd.DataFrame({'pdb': pdb_list, 'loss_native': loss_native})
-df.to_csv(f'data/decoys/decoys_seq/{decoy_loss_dir}/hhsuite_CB_cullpdb_val_no_missing_residue_sample_loss.csv', index=False)
+df.to_csv(data_path('decoys', 'decoys_seq', decoy_loss_dir, 'hhsuite_CB_cullpdb_val_no_missing_residue_sample_loss.csv'), index=False)
 

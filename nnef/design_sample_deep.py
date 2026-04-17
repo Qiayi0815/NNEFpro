@@ -1,12 +1,12 @@
-import numpy as np
 import pandas as pd
 import torch
-from physics.protein_os import Protein
+from nnef.protein_os import Protein
 import options
 from physics.anneal import AnnealSeq
 import os
 import h5py
 from utils import test_setup
+from paths import data_path, ensure_dir
 
 
 """
@@ -25,7 +25,7 @@ ProteinBase.ref_scale = 300.0
 
 #################################################
 def load_protein(root_dir, pdb_id, mode, device, args):
-    amino_acids = pd.read_csv('data/amino_acids.csv')
+    amino_acids = pd.read_csv(data_path('amino_acids.csv'))
     vocab = {x.upper(): y - 1 for x, y in zip(amino_acids.AA3C, amino_acids.idx)}
 
     df_beads = pd.read_csv(f'{root_dir}/{pdb_id}_bead.csv')
@@ -46,17 +46,15 @@ def load_protein(root_dir, pdb_id, mode, device, args):
     return seq, coords, profile
 
 
-root_dir = 'data/design/cullpdb_val_deep'
+root_dir = data_path('design', 'cullpdb_val_deep')
 protein_sample = pd.read_csv(f'{root_dir}/sample_train.csv')
 pdb_selected = protein_sample['pdb'].values
-# np.random.shuffle(pdb_selected)
 
 design_engine = args.fold_engine
 mode = args.mode
 exp_id = args.load_exp[-5:]
 save_dir = args.save_dir
-if not os.path.exists(f'{root_dir}/{save_dir}'):
-    os.mkdir(f'{root_dir}/{save_dir}')
+ensure_dir(os.path.join(root_dir, save_dir))
 
 num_iter = 100
 

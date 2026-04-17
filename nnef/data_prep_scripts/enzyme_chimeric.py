@@ -5,6 +5,9 @@ import matplotlib.pyplot as pl
 
 
 def make_chimeric_enzyme():
+    # This function generates chimeric enzyme sequences by aligning multiple sequences to a reference(PDB) sequence,
+    # calculating insertion and deletion fractions, and measuring how much each sequence differs
+    # from the reference.The resulting data is saved for further analysis.
     AA = '-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
     aa_to_id = {y: x for x, y in enumerate(list(AA))}
     id_to_aa = {x: y for x, y in enumerate(list(AA))}
@@ -46,6 +49,9 @@ def make_chimeric_enzyme():
 
 
 def plot_enzyme_score():
+    # This function reads energy scores associated
+    # with the chimeric sequences and performs basic statistical analysis and plotting.
+
     root_dir = '/home/hyang/bio/erf/data/stability/enzyme'
     pdb_list = ['6THT_A', '6EQE_A', '5ZOA_A']
 

@@ -1,12 +1,12 @@
 import os
 import torch
 from tqdm import tqdm
-import numpy as np
 import pandas as pd
 import options
-from physics.protein_os import Protein
+from nnef.protein_os import Protein
 from physics.grad_minimizer import GradMinimizerCartesian
 from utils import test_setup
+from paths import data_path, ensure_dir
 import h5py
 import mdtraj as md
 import matplotlib.pyplot as pl
@@ -22,13 +22,13 @@ if not args.relax:
 
 
 #################################################
-def load_protein(data_path, pdb_id, device):
+def load_protein(data_dir, pdb_id, device):
     # load coords as torch.double dtype
-    amino_acids = pd.read_csv('data/amino_acids.csv')
+    amino_acids = pd.read_csv(data_path('amino_acids.csv'))
     vocab = {x.upper(): y - 1 for x, y in zip(amino_acids.AA3C, amino_acids.idx)}
 
     print(pdb_id)
-    df_beads = pd.read_csv(f'{data_path}/{pdb_id}_bead.csv')
+    df_beads = pd.read_csv(f'{data_dir}/{pdb_id}_bead.csv')
     seq = df_beads['group_name'].values
     seq_id = df_beads['group_name'].apply(lambda x: vocab[x]).values
 
@@ -40,10 +40,9 @@ def load_protein(data_path, pdb_id, device):
 
 decoy_set = args.decoy_set
 decoy_loss_dir = args.decoy_loss_dir
-root_dir = f'./data/fold/cullpdb_val_deep/'
+root_dir = data_path('fold', 'cullpdb_val_deep')
 
-if not os.path.exists(f'{root_dir}/{decoy_loss_dir}'):
-    os.system(f'mkdir -p {root_dir}/{decoy_loss_dir}')
+ensure_dir(os.path.join(root_dir, decoy_loss_dir))
 
 pdb_selected = pd.read_csv(f'{root_dir}/sample.csv')['pdb'].values
 

@@ -9,6 +9,7 @@ import os
 def check_hh_pdb():
     # make sure the hhsuite seq and the seq from ATOM records match.
     # make sure the group num is the correct index of hhsuite seq.
+    # check_hh_pdb函数的主要目的是验证hhsuite生成的序列与PDB文件中的序列是否匹配，并生成一个匹配的PDB列表。
     pdb_list = pd.read_csv('hhsuite_beads/hhsuite_pdb_beads_list.txt')['pdb'].values
 
     amino_acids = pd.read_csv('amino_acids.csv')
@@ -48,6 +49,7 @@ def check_hh_pdb():
 
 ###########################################
 def _rotation_matrix(c1, c2):
+    # _rotation_matrix函数用于计算旋转矩阵。给定两个向量c1和c2，该函数计算一个正交的旋转矩阵，使得c1对齐到新的坐标系的x轴方向。
     z = np.cross(c1, c2)
     x = c1
     y = np.cross(z, x)
@@ -60,6 +62,8 @@ def _rotation_matrix(c1, c2):
 
 
 def extract_one_topk(pdb_id, df_beads, local_rot_dir, k=10, mode='CA'):
+    #extract_one_topk函数用于从给定的PDB
+    #ID和对应的bead数据中提取局部结构信息，进行坐标旋转，并选取最近的k个残基（top - k），然后将处理后的数据保存为CSV文件。
     if df_beads.shape[0] < 20:
         return
 
@@ -194,6 +198,8 @@ def extract_one_topk(pdb_id, df_beads, local_rot_dir, k=10, mode='CA'):
 
 
 def extract_local_structure():
+    # extract_local_structure函数用于批量提取局部结构信息，利用多进程加速处理。
+    # 具体而言，它读取匹配的PDB列表，随机打乱顺序，并将任务分配到多个进程中，每个进程处理一部分PDB。
     mode = 'CB'
 
     data_dir = 'hhsuite_local_rot'
@@ -229,6 +235,7 @@ def extract_local_structure():
 ############################################
 
 def save_local_h5():
+    # save_local_h5函数用于将提取的局部结构信息保存到HDF5文件中。这种文件格式适用于高效存储和读取大规模数据。
     mode = 'CB'
 
     local_rot_dir = f'hhsuite_local_rot/'
@@ -286,6 +293,8 @@ def save_local_h5():
     df_pdb = pd.DataFrame({'pdb': used_pdb_list})
     df_pdb.to_csv(f'hhsuite_{mode}_pdb_list.csv', index=False)
 
+
+# get_weights函数用于计算每个PDB的权重，并将权重信息添加到PDB列表的CSV文件中。权重的计算基于序列数量和残基数量。
 
 def get_weights():
     mode = 'CB'

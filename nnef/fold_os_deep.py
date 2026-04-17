@@ -1,13 +1,11 @@
-import numpy as np
-import pandas as pd
-import torch
-from physics.protein_os import Protein
+from nnef.protein_os import Protein
 import options
-from utils import write_pdb, write_pdb_sample, transform_profile, load_protein
+from utils import write_pdb_sample, load_protein
 from physics.anneal import AnnealCoords, AnnealFrag
 # from physics.move import SampleICNext
 from physics.grad_minimizer import *
 from physics.dynamics import *
+from paths import data_path, ensure_dir
 import os
 import mdtraj as md
 import h5py
@@ -22,26 +20,21 @@ args = options.parse_args_and_arch(parser)
 device, model, energy_fn, ProteinBase = test_setup(args)
 
 #################################################
-data_path = 'data/fold/cullpdb_val_deep'
-protein_sample = pd.read_csv(f'{data_path}/sample.csv')
+data_dir = data_path('fold', 'cullpdb_val_deep')
+protein_sample = pd.read_csv(f'{data_dir}/sample.csv')
 pdb_selected = protein_sample['pdb'].values
-# pdb_selected = ['1BPI_A']
 
 fold_engine = args.fold_engine
 mode = args.mode
-# sample_ic = SampleICNext(mode)
 exp_id = args.load_exp[-5:]
 save_dir = args.save_dir
-# if not os.path.exists(f'data/fold/{exp_id}'):
-#     os.mkdir(f'data/fold/{exp_id}')
-if not os.path.exists(f'data/fold/{save_dir}'):
-    os.mkdir(f'data/fold/{save_dir}')
+ensure_dir(data_path('fold', save_dir))
 
 num_iter = 20
 
 for pdb_id in pdb_selected:
 
-    seq, coords_native, profile = load_protein(data_path, pdb_id, mode, device, args)
+    seq, coords_native, profile = load_protein(data_dir, pdb_id, mode, device, args)
 
     protein_native = Protein(seq, coords_native, profile)
     energy_native = protein_native.get_energy(energy_fn).item()
@@ -74,7 +67,7 @@ for pdb_id in pdb_selected:
             if args.anneal_type == 'int_one':
                 annealer = AnnealCoords(energy_fn, protein, mode=mode, T_max=args.T_max, T_min=args.T_min, L=args.L)
             elif args.anneal_type == 'frag':
-                frag_file = h5py.File(f'data/fragment/{pdb_id}/{pdb_id}_int.h5', 'r')
+                frag_file = h5py.File(data_path('fragment', pdb_id, f'{pdb_id}_int.h5'), 'r')
                 query_pos = torch.tensor(frag_file['query_pos'][()], device=device)
                 frag_int = torch.tensor(frag_file['coords_int'][()], device=device)
                 annealer = AnnealFrag(energy_fn, protein, frag=(query_pos, frag_int), use_rg=args.use_rg,
@@ -142,7 +135,7 @@ for pdb_id in pdb_selected:
         sample_xyz = torch.stack(sample, 0).cpu().detach().numpy()
         print(sample_xyz.shape)
 
-        with h5py.File(f'data/fold/{save_dir}/{pdb_id}_xyz_{i}.h5', 'w') as f:
+        with h5py.File(data_path('fold', save_dir, f'{pdb_id}_xyz_{i}.h5'), 'w') as f:
             dset = f.create_dataset("xyz", shape=sample_xyz.shape, data=sample_xyz, dtype='f4')
 
         # write_pdb_sample(seq, sample[0:3], pdb_id, f'sample_{i}', save_dir)
@@ -153,7 +146,7 @@ for pdb_id in pdb_selected:
 
         df = pd.DataFrame({'sample_energy': sample_energy,
                            'sample_rmsd': sample_rmsd})
-        df.to_csv(f'data/fold/{save_dir}/{pdb_id}_energy_{i}.csv', index=False)
+        df.to_csv(data_path('fold', save_dir, f'{pdb_id}_energy_{i}.csv'), index=False)
 
     sample_best_all = torch.stack(sample_best_all, 0).cpu().detach().numpy()
     write_pdb_sample(seq, sample_best_all, pdb_id, f'sample_all', save_dir)
@@ -163,7 +156,7 @@ for pdb_id in pdb_selected:
 
     df = pd.DataFrame({'sample_energy': energy_best_all,
                        'sample_rmsd': sample_rmsd})
-    df.to_csv(f'data/fold/{save_dir}/{pdb_id}_energy_all.csv', index=False)
+    df.to_csv(data_path('fold', save_dir, f'{pdb_id}_energy_all.csv'), index=False)
 
 
 

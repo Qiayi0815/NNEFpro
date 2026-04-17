@@ -2,9 +2,24 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
-from torch.utils.tensorboard import SummaryWriter
-from model import LocalEnergyCE
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ModuleNotFoundError:  # pragma: no cover - optional dev dependency
+    class SummaryWriter:  # type: ignore
+        def __init__(self, *a, **kw):
+            pass
+
+        def add_scalar(self, *a, **kw):
+            pass
+
+        def close(self):
+            pass
+
+from model.local_ss import LocalEnergyCE
 import pandas as pd
+
+from paths import data_path
 
 
 class EnergyFun(nn.Module):
@@ -20,15 +35,34 @@ class EnergyFun(nn.Module):
             self.writer = SummaryWriter('runs/fold/')
             self.counter = 0
 
-    def forward(self, seq, coords, start_id, res_counts):
-        loss_r, loss_angle, loss_profile, loss_start_id, loss_res_counts = self.energy_fn.forward(seq, coords, start_id, res_counts)
+    def forward(self, seq, coords, start_id, res_counts,
+                rama=None, rama_mask=None,
+                esm=None, coords_cart=None, seq_offset=None,
+                dihedral=None):
+        # LocalEnergyCE.forward returns 6 values after the Rama addition
+        # (loss_r, loss_angle, loss_seq, loss_start_id, loss_res_counts, loss_rama);
+        # older checkpoints / variants may still return 5. Handle both.
+        out = self.energy_fn.forward(
+            seq, coords, start_id, res_counts,
+            rama=rama, rama_mask=rama_mask,
+            esm=esm, coords_cart=coords_cart, seq_offset=seq_offset,
+            dihedral=dihedral,
+        )
+        if len(out) == 6:
+            loss_r, loss_angle, loss_profile, loss_start_id, loss_res_counts, loss_rama = out
+        elif len(out) == 5:
+            loss_r, loss_angle, loss_profile, loss_start_id, loss_res_counts = out
+            loss_rama = torch.tensor(0.0, device=seq.device)
+        else:
+            raise ValueError(f"Unexpected number of loss terms from energy_fn: {len(out)}")
 
-        energy = loss_r + loss_angle + loss_profile + loss_start_id + loss_res_counts
+        energy = loss_r + loss_angle + loss_profile + loss_start_id + loss_res_counts + loss_rama
 
         if self.debug:
             self.writer.add_scalar('profile_loss', loss_profile.item(), self.counter)
             self.writer.add_scalar('coords_radius_loss', loss_r.item(), self.counter)
             self.writer.add_scalar('coords_angle_loss', loss_angle.item(), self.counter)
+            self.writer.add_scalar('coords_rama_loss', loss_rama.item(), self.counter)
             self.writer.add_scalar('start_id_loss', loss_start_id.item(), self.counter)
             self.writer.add_scalar('res_counts_loss', loss_res_counts.item(), self.counter)
             self.writer.add_scalar('total_loss', energy.item(), self.counter)
@@ -38,7 +72,7 @@ class EnergyFun(nn.Module):
             energy = energy * coords.size(0)
 
         if self.return_loss_terms:
-            return energy, loss_r, loss_angle, loss_profile, loss_start_id, loss_res_counts
+            return energy, loss_r, loss_angle, loss_profile, loss_start_id, loss_res_counts, loss_rama
         else:
             return energy
 
@@ -49,9 +83,17 @@ class ProteinBase:
     ref_scale = 400.0
     use_ref = False
     energy_model_type = None
+    # Inference-side feature-extraction switches. Mirror the training-side
+    # flags on options.py; set by utils.test_setup. Default to False so any
+    # code path that predates these additions stays bit-identical.
+    use_cart_coords = False
+    use_seq_offset = False
+    seq_offset_max = 64
+    use_esm = False
+    use_dihedral = False
 
     def __init__(self):
-        df = pd.read_csv('data/aa_freq_alpha-beta-train.csv')
+        df = pd.read_csv(data_path('aa_freq_alpha-beta-train.csv'))
         self.energy_ref = torch.tensor(df['e_ref'].values, dtype=torch.float)
 
 
@@ -67,12 +109,37 @@ class Protein(ProteinBase):
     C-B along negative x. C-B-A in x-y plane.
     """
 
-    def __init__(self, seq, coords, profile, protein_id=None):
+    def __init__(self, seq, coords, profile,
+                 esm_full=None, dihedral_full=None, protein_id=None):
         super().__init__()
         self.seq = seq  # (N,)
         self.coords = coords  # (N, 3)
         self.coords_int = None
         self.profile = profile  # (N, E) for evolution profile, (N,) for residues
+        # Optional per-residue ESM embedding for the full chain, shape
+        # (N, d_esm_in). Stored as-is (float16 or float32); `_gather_esm_local`
+        # casts to coords.dtype at gather time. Left as None when --use_esm
+        # is off so the energy path stays bit-identical.
+        if esm_full is not None:
+            assert esm_full.shape[0] == coords.shape[0], (
+                f'esm_full length {esm_full.shape[0]} does not match coords '
+                f'length {coords.shape[0]} for chain {protein_id!r}'
+            )
+            esm_full = esm_full.to(device=coords.device)
+        self.esm_full = esm_full
+        # Optional per-residue backbone dihedrals for the full chain, shape
+        # (N, 2) in radians: column 0 = phi, column 1 = psi. NaNs at chain
+        # termini (phi[0], psi[N-1]) are tolerated and zero-masked at gather
+        # time; callers typically precompute this from N/CA/C atoms in decoy
+        # bead CSVs (see utils._compute_phi_psi_from_backbone).
+        if dihedral_full is not None:
+            assert dihedral_full.shape == (coords.shape[0], 2), (
+                f'dihedral_full shape {tuple(dihedral_full.shape)} does not '
+                f'match (coords.shape[0]={coords.shape[0]}, 2) for '
+                f'chain {protein_id!r}'
+            )
+            dihedral_full = dihedral_full.to(device=coords.device)
+        self.dihedral_full = dihedral_full
         # reference energy of unfold state
         self.energy_ref = self.energy_ref.to(self.coords.device)
         self.energy_seq = torch.mean(self.energy_ref[profile]) * self.ref_scale
@@ -373,7 +440,11 @@ class Protein(ProteinBase):
 
         res_counts = res_counts.to(torch.float)
 
-        return profile_local, coords_local, start_id, res_counts
+        # NOTE: returns g_local as a 5th element so get_energy / get_residue_energy
+        # can derive the signed chain-distance feature without recomputing.
+        # Only internal callers (same file) use this, so the extra element is
+        # an additive, non-breaking change for this class.
+        return profile_local, coords_local, start_id, res_counts, g_local
 
     @staticmethod
     def _local_cartesian_to_radian(coords_local):
@@ -390,23 +461,110 @@ class Protein(ProteinBase):
         coords = torch.stack((r, theta, phi), dim=2)  # (N-4, 5+k, 3)
         return coords
 
+    def _build_extras(self, coords_local_cart, g_local):
+        """Derive the optional inference-side extras that mirror the
+        training-side dataset outputs in data_chimeric. Returns
+        (coords_cart, seq_offset, esm_local, dihedral_local); any of the four
+        may be None when its flag is off or the corresponding payload is not
+        available.
+        """
+        coords_cart = coords_local_cart.clone() if self.use_cart_coords else None
+        seq_offset = None
+        if self.use_seq_offset:
+            M = int(self.seq_offset_max)
+            # Central residue sits at index 0 of every block (see get_local_struct).
+            offset = g_local - g_local[:, 0:1]
+            offset = torch.clamp(offset, min=-M, max=M) + M  # shift to [0, 2M]
+            seq_offset = offset.to(torch.long)
+        esm_local = self._gather_esm_local(g_local)
+        dihedral_local = self._gather_dihedral_local(g_local)
+        return coords_cart, seq_offset, esm_local, dihedral_local
+
+    def _gather_esm_local(self, g_local):
+        """Gather per-block ESM slices from the full-chain cache.
+
+        Returns a tensor of shape ``(N-4, 5+k, d_esm_in)`` cast to the
+        protein's coord dtype (float32 in normal use), or ``None`` if
+        ``self.use_esm`` is off / no cache was supplied.
+
+        Out-of-bounds indices in ``g_local`` (should not happen in practice
+        because g_local is built from 0..N-1 and esm_full is asserted to be
+        length N at __init__, but we keep the defensive check to mirror the
+        training-side dataset contract) are clamped and the corresponding
+        slices zeroed.
+        """
+        if not self.use_esm or self.esm_full is None:
+            return None
+        L_chain = self.esm_full.shape[0]
+        invalid = (g_local < 0) | (g_local >= L_chain)
+        clamped = g_local.clamp(min=0, max=L_chain - 1)
+        esm_local = self.esm_full[clamped]
+        if invalid.any():
+            esm_local = esm_local.clone()
+            esm_local[invalid] = 0.0
+        return esm_local.to(self.coords.dtype)
+
+    def _gather_dihedral_local(self, g_local):
+        """Gather per-block backbone dihedrals, encoded as sin/cos 4-d.
+
+        Returns a tensor shaped ``(N-4, 5+k, 4)`` = (sin phi, cos phi, sin psi,
+        cos psi) cast to coord dtype, or ``None`` when ``use_dihedral`` is off
+        or no chain-level dihedral cache was supplied.
+
+        Chain-terminal NaNs (phi[0], psi[L-1]) and out-of-range g_local indices
+        are zero-masked in all 4 channels, matching the training-side
+        convention where `rama_mask==0` positions are zeroed before the
+        additive `linear_x_dihedral` layer sees them.
+        """
+        if not self.use_dihedral or self.dihedral_full is None:
+            return None
+        L_chain = self.dihedral_full.shape[0]
+        invalid_idx = (g_local < 0) | (g_local >= L_chain)
+        clamped = g_local.clamp(min=0, max=L_chain - 1)
+        phi_psi = self.dihedral_full[clamped]  # (N-4, 5+k, 2)
+        nan_mask = torch.isnan(phi_psi).any(dim=-1) | invalid_idx
+        phi_psi = torch.nan_to_num(phi_psi, nan=0.0, posinf=0.0, neginf=0.0)
+        sin_pp = torch.sin(phi_psi)
+        cos_pp = torch.cos(phi_psi)
+        dihedral_local = torch.stack(
+            [sin_pp[..., 0], cos_pp[..., 0], sin_pp[..., 1], cos_pp[..., 1]],
+            dim=-1,
+        )
+        dihedral_local = dihedral_local * (~nan_mask).unsqueeze(-1).to(dihedral_local.dtype)
+        return dihedral_local.to(self.coords.dtype)
+
     def get_energy(self, energy_fun):
-        profile_local, coords_local, start_id, res_counts = self.get_local_struct()
+        profile_local, coords_local, start_id, res_counts, g_local = self.get_local_struct()
+        coords_cart, seq_offset, esm_local, dihedral_local = self._build_extras(
+            coords_local, g_local)
         coords_local = self._local_cartesian_to_radian(coords_local)
-        energy = energy_fun.forward(profile_local, coords_local, start_id, res_counts)
+        energy = energy_fun.forward(
+            profile_local, coords_local, start_id, res_counts,
+            coords_cart=coords_cart, seq_offset=seq_offset, esm=esm_local,
+            dihedral=dihedral_local,
+        )
         if self.use_ref:
             energy = energy - self.energy_seq
         return energy
 
     def get_residue_energy(self, energy_fun):
         # seq & profile have add up to seq_feature
-        profile_local, coords_local, start_id, res_counts = self.get_local_struct()
+        profile_local, coords_local, start_id, res_counts, g_local = self.get_local_struct()
+        coords_cart, seq_offset, esm_local, dihedral_local = self._build_extras(
+            coords_local, g_local)
         coords_local = self._local_cartesian_to_radian(coords_local)
         num = coords_local.size(0)
         residue_energy = np.zeros(num)
         for i in range(num):
-            residue_energy[i] = energy_fun.forward(profile_local[i:i+1], coords_local[i:i+1],
-                                                   start_id[i:i+1], res_counts[i:i+1])
+            cc_i = coords_cart[i:i+1] if coords_cart is not None else None
+            so_i = seq_offset[i:i+1] if seq_offset is not None else None
+            em_i = esm_local[i:i+1] if esm_local is not None else None
+            dh_i = dihedral_local[i:i+1] if dihedral_local is not None else None
+            residue_energy[i] = energy_fun.forward(
+                profile_local[i:i+1], coords_local[i:i+1],
+                start_id[i:i+1], res_counts[i:i+1],
+                coords_cart=cc_i, seq_offset=so_i, esm=em_i, dihedral=dh_i,
+            )
         return residue_energy
 
     def get_local_struct_phy(self):

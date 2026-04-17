@@ -1,10 +1,25 @@
 import argparse
 
+from paths import data_path
+
 
 def get_common_parser():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--load_exp", type=str, default=None)
+    parser.add_argument("--load_exp", type=str, default=None,
+                        help="Run directory containing models/model.pt (inference / resume).")
+    parser.add_argument(
+        "--load_checkpoint", type=str, default=None,
+        help="Direct path to a saved state_dict (.pt). When set, overrides "
+             "load_exp/models/model.pt in test_setup and decoy scoring; can "
+             "also initialise training instead of load_exp.",
+    )
+    parser.add_argument("--exp_id", type=str, default='default',
+                        help='Experiment id used to name the run directory under '
+                             '--save_path (so multiple sbatch jobs do not collide).')
+    parser.add_argument("--seed", type=int, default=42,
+                        help='Random seed for python / numpy / torch. Same seed + '
+                             'same flags = reproducible training.')
 
     parser.add_argument("--mode", type=str, default='CB', help='CA / CB / CAS')
 
@@ -32,6 +47,10 @@ def get_common_parser():
     parser.add_argument("--mixture_angle", type=int, default=10, help="num of Gaussian mixtures for angles")
     parser.add_argument("--mixture_seq", type=int, default=3, help="num of Gaussian mixtures for sequences")
     parser.add_argument("--mixture_res_counts", type=int, default=1, help="num of Gaussian mixtures for res counts")
+    parser.add_argument("--mixture_rama", type=int, default=10,
+                        help="num of bivariate Gaussian mixtures for the Ramachandran (phi, psi) head")
+    parser.add_argument("--coords_rama_loss_lamda", type=float, default=1.0,
+                        help="weight of the Ramachandran NLL term in the total loss")
 
     parser.add_argument("--smooth_gaussian", action='store_true', default=False,
                         help='smooth the gaussian mixture function of r, theta, phi.')
@@ -59,12 +78,56 @@ def get_common_parser():
 
     parser.add_argument("--debug", action='store_true', default=False)
 
+    # -----------------------------------------------------------------------
+    # ESM-enhanced structural tokens (feature extraction boost, opt-in).
+    # When --use_esm is OFF, the model, dataset tuple, and training step are
+    # bit-identical to the original NNEF.
+    # -----------------------------------------------------------------------
+    parser.add_argument("--use_esm", action='store_true', default=False,
+                        help="Inject pretrained pLM (ESM) per-residue embeddings into the structure branch.")
+    parser.add_argument("--esm_dim_in", type=int, default=1152,
+                        help="Per-residue ESM embedding dim. Defaults match ESM-C 600M (1152). ESM2-650M is 1280; ESM-C 300M is 960; ESM2-35M is 480. Must match the model used by precompute_esm.py.")
+    parser.add_argument("--esm_dim_out", type=int, default=32,
+                        help="Projected ESM dim that is concatenated into the structure token.")
+    parser.add_argument("--esm_h5_path", type=str, default=data_path('hhsuite_esm_v2.h5'),
+                        help="Per-PDB h5 cache of per-residue ESM embeddings (fp16).")
+    parser.add_argument("--esm_dataset_name", type=str, default='esm',
+                        help="h5 dataset name inside each PDB group holding the (L_chain, d_esm) matrix.")
+    parser.add_argument("--esm_fuse", type=str, default='concat', choices=['concat', 'film'],
+                        help="How to fuse the projected ESM vector into the structure token.")
+
+    # -----------------------------------------------------------------------
+    # Additional internal coordinate / block-representation enhancements.
+    # Both flags are OFF by default -> baseline bit-identical.
+    # -----------------------------------------------------------------------
+    parser.add_argument("--use_cart_coords", action='store_true', default=False,
+                        help="Keep block-local Cartesian (x,y,z) alongside spherical (r,theta,phi) "
+                             "in the structure token (recovers linear cues lost during the spherical "
+                             "conversion in data_chimeric).")
+    parser.add_argument("--use_seq_offset", action='store_true', default=False,
+                        help="Embed signed chain offset (group_num[j] - group_num[central]) per block "
+                             "position, clipped to [-seq_offset_max, seq_offset_max]. Distinguishes "
+                             "chain-distance from the existing slot-index position embedding.")
+    parser.add_argument("--seq_offset_max", type=int, default=64,
+                        help="Clamp range for --use_seq_offset. Embedding table has 2*max+2 entries.")
+
+    parser.add_argument("--use_dihedral", action='store_true', default=False,
+                        help="Inject per-residue backbone dihedrals (phi, psi) as sin/cos 4-d input. "
+                             "v2 local coords encode only the central residue N/CA/C via the local "
+                             "frame; the 14 neighbors are CB-only, so explicit phi/psi adds real "
+                             "information (especially for decoy discrimination, where bad backbones "
+                             "land outside the Ramachandran allowed region).")
+
     return parser
 
 
 def get_local_gen_parser():
     parser = get_common_parser()
-    parser.add_argument("--data_flag", type=str, default='train_small')
+    parser.add_argument("--data_flag", type=str,
+                        default='hhsuite_CB_v2_pdb_list.csv',
+                        help='CSV of pdb ids + weights (resolved relative to '
+                             'nnef/data/). Must contain at least columns: pdb, '
+                             'weight. seq_len is optional.')
     parser.add_argument("--val_data_flag", type=str, default=None)
     parser.add_argument("--test_data_flag", type=str, default=None)
     parser.add_argument("--chimeric", action='store_true', default=False)
@@ -72,6 +135,16 @@ def get_local_gen_parser():
     parser.add_argument("--struct_seq_id", type=str, default='struct_seq_id_CB')
     parser.add_argument("--total_num_samples", type=int, default=1000000, help='used in WeightedRandomSampler')
     parser.add_argument("--no_homology", action='store_true', default=False)
+
+    # Bundled data h5 caches (defaults resolve to <package>/data/ so they work
+    # regardless of the shell's CWD; override on the CLI for custom locations).
+    parser.add_argument("--pdb_h5_path", type=str,
+                        default=data_path('hhsuite_CB_v2.h5'))
+    parser.add_argument("--seq_h5_path", type=str,
+                        default=data_path('hhsuite_pdb_seq_v2.h5'))
+    parser.add_argument("--rama_h5_path", type=str,
+                        default=data_path('hhsuite_rama_cullpdb.h5'))
+    parser.add_argument("--rama_dataset_name", type=str, default='rama')
 
     parser.add_argument("--save_path", type=str, default='./runs/')
 
@@ -85,7 +158,12 @@ def get_local_gen_parser():
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--log_interval", type=int, default=100)
-    parser.add_argument("--save_interval", type=int, default=10)
+    parser.add_argument(
+        "--save_interval", type=int, default=50,
+        help="Every N completed training epochs, also save "
+             "models/model_epoch_XXXX.pt (1-based epoch in the filename). "
+             "Use 0 to disable these extras (model.pt is still updated every epoch).",
+    )
 
     return parser
 
@@ -160,7 +238,12 @@ def get_train_fold_parser():
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--log_interval", type=int, default=100)
-    parser.add_argument("--save_interval", type=int, default=10)
+    parser.add_argument(
+        "--save_interval", type=int, default=50,
+        help="Every N completed training epochs, also save "
+             "models/model_epoch_XXXX.pt (1-based epoch in the filename). "
+             "Use 0 to disable these extras (model.pt is still updated every epoch).",
+    )
     parser.add_argument("--save_path", type=str, default='./runs/', help='path to save learned models')
 
     return parser
