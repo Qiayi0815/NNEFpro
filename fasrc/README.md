@@ -24,6 +24,7 @@ precompute. You package raw bead/chimeric CSVs into `.h5` on your laptop
 | `sync_3drobot_decoys_to_cluster.sh`   | Laptop: rsync `nnef/data/decoys/3DRobot_set/` (beads + lists) to Cannon. |
 | `sync_runs_to_cluster.sh`             | Laptop: push selected `runs/<exp>/` checkpoints when cluster lacks them. |
 | `eval_3drobot_batch.slurm`            | Cannon: GPU batch job → `python nnef/scripts/batch_eval_3drobot.py --device cuda`. |
+| `eval_v1_pure_rama_v2_casp14_3drobot.slurm` | Cannon: **only** `runs/v1_pure_rama_v2_<JOBID>` on CASP14 + 3DRobot (after rama-v2 train finishes). |
 | `pull_models_from_cluster.sh`       | Laptop: pull `runs/<exp>/` or `--all-final` (every `models/model.pt`). |
 
 ## Ablation matrix
