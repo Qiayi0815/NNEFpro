@@ -17,7 +17,7 @@
 # Data: v2 HDF5 on $DATA_DIR (same as v2_cart_offset / v3_full):
 #   hhsuite_CB_v2.h5          — v2 building blocks + intra-residue local frame
 #   hhsuite_pdb_seq_v2.h5     — chimeric sequences
-#   hhsuite_CB_cullpdb_wo_rama.h5 — Ramachandran supervision cache
+#   hhsuite_rama_v2.h5 — per-block φ/ψ aligned 1:1 with hhsuite_CB_v2.h5
 #
 # Everything else (optimizer, batch, epochs, mixture heads) matches train.slurm
 # (v2_cart_offset) and fasrc/train_v3_full.slurm so ablations are comparable.
@@ -69,7 +69,7 @@ cd "$SLURM_SUBMIT_DIR"
 mkdir -p runs
 
 "$PY" -u nnef/train_chimeric.py \
-    --exp_id v1_pure_${SLURM_JOB_ID} \
+    --exp_id v1_pure_rama_v2_${SLURM_JOB_ID} \
     --save_path runs \
     --seq_type residue \
     --residue_type_num 20 \
@@ -86,6 +86,6 @@ mkdir -p runs
     --epochs 200 --total_num_samples 1000000 \
     --pdb_h5_path "$DATA_DIR/hhsuite_CB_v2.h5" \
     --seq_h5_path "$DATA_DIR/hhsuite_pdb_seq_v2.h5" \
-    --rama_h5_path "$DATA_DIR/hhsuite_CB_cullpdb_wo_rama.h5"
+    --rama_h5_path "$DATA_DIR/hhsuite_rama_v2.h5"
 
 echo "[train_v1_pure] finished with exit code $?"

@@ -100,7 +100,7 @@ mkdir -p runs
     --epochs 200 --total_num_samples 1000000 \
     --pdb_h5_path "$DATA_DIR/hhsuite_CB_v2.h5" \
     --seq_h5_path "$DATA_DIR/hhsuite_pdb_seq_v2.h5" \
-    --rama_h5_path "$DATA_DIR/hhsuite_CB_cullpdb_wo_rama.h5" \
+    --rama_h5_path "$DATA_DIR/hhsuite_rama_v2.h5" \
     --use_cart_coords --use_seq_offset \
     --use_esm \
     --esm_h5_path "$ESM_H5" \

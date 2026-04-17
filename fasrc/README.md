@@ -76,11 +76,14 @@ rsync -avh --progress \
 # 3. Sync the packaged h5s + small sidecar CSVs into $HOME/nnef_data.
 #    Note: do NOT ship hhsuite_esm_v2.h5 from your laptop -- it's 5-6 GB
 #    and we generate it ON the cluster via precompute_esm.slurm.
+#    hhsuite_rama_v2.h5 must align 1:1 with hhsuite_CB_v2.h5; build with
+#    `python -m nnef.data_prep_scripts.build_rama_h5_v2 build --cb_h5 ... --bead_dir ... --out_h5 ...`
+#    then `verify` before rsync.
 rsync -avh --progress \
     nnef/data/hhsuite_CB_v2.h5 \
     nnef/data/hhsuite_CB_v2_pdb_list.csv \
     nnef/data/hhsuite_pdb_seq_v2.h5 \
-    nnef/data/hhsuite_CB_cullpdb_wo_rama.h5 \
+    nnef/data/hhsuite_rama_v2.h5 \
     qzha@login.rc.fas.harvard.edu:/n/home03/qzha/nnef_data/
 ```
 

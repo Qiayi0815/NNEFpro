@@ -26,7 +26,7 @@ class DatasetLocalGenCM(Dataset):
         if seq_h5_path is None:
             seq_h5_path = data_path('hhsuite_pdb_seq_v2.h5')
         if rama_h5_path is None:
-            rama_h5_path = data_path('hhsuite_rama_cullpdb.h5')
+            rama_h5_path = data_path('hhsuite_rama_v2.h5')
         self.seq_factor = args.seq_factor          # 0.5 与序列相关的参数
         self.seq_len = args.seq_len + 1            # 序列长度（包含起始符号位），模型将考虑的蛋白质片段的长度
         self.noise_factor = args.noise_factor      # 0.001 数据中的噪声因子
@@ -133,6 +133,17 @@ class DatasetLocalGenCM(Dataset):
         if hh_data_esm is not None:
             hh_data_esm.close()
 
+        n_rama_loaded = sum(1 for v in self.rama_dict.values() if v is not None)
+        if n_rama_loaded == 0:
+            print(
+                '[DatasetLocalGenCM] WARNING: no per-PDB Ramachandran blocks loaded '
+                f'({n_rama_loaded}/{len(self.pdb_list)}). '
+                f'Check --rama_h5_path ({rama_h5_path!s}) contains dataset '
+                f'{rama_dataset_name!r} under each PDB key. '
+                'When masks are all zero, LocalEnergyCE yields coords_rama_loss ~ 0. '
+                'Use hhsuite_rama_v2.h5 from build_rama_h5_v2.py; not wo_rama stubs.'
+            )
+
     def __len__(self):
         return self.num
 
@@ -234,25 +245,24 @@ class DatasetLocalGenCM(Dataset):
         if rama15 is not None:
             # numpy -> torch
             rama15 = torch.tensor(rama15, dtype=torch.float)  # (15, 2)
+            valid = torch.isfinite(rama15).all(dim=-1).float()  # (15,)
 
-            # 可选：确保落在 (-pi, pi] 区间
-            # wrap to (-pi, pi]
-            pi = np.pi
-            rama15 = ((rama15 + pi) % (2 * pi)) - pi
+            # Wrap to (-pi, pi] only where defined; NaN -> 0 before wrap for stability
+            pi = float(np.pi)
+            rama15_safe = torch.nan_to_num(rama15, nan=0.0, posinf=0.0, neginf=0.0)
+            rama15_safe = ((rama15_safe + pi) % (2 * pi)) - pi
 
             if L == 15:
-                # 直接放入
-                rama_full[:] = rama15
-                rama_mask[:] = 1.0
+                rama_full[:] = rama15_safe
+                rama_mask[:] = valid
             elif L > 15:
-                # 居中对齐：在序列中间放入 15 个
                 start = (L - 15) // 2
                 end = start + 15
-                rama_full[start:end] = rama15
-                rama_mask[start:end] = 1.0
-            else:  # L < 15: 截断
-                rama_full[:] = rama15[:L]
-                rama_mask[:] = 1.0  # 有效位都是 1
+                rama_full[start:end] = rama15_safe
+                rama_mask[start:end] = valid
+            else:
+                rama_full[:] = rama15_safe[:L]
+                rama_mask[:] = valid[:L]
         else:
             # 没有 rama 数据：保持零与零 mask（下游可忽略这些位置）
             pass
@@ -345,7 +355,7 @@ if __name__ == '__main__':
     # 可根据实际文件名修改
     parser.add_argument("--pdb_h5_path", type=str, default=data_path('hhsuite_CB_v2.h5'))
     parser.add_argument("--seq_h5_path", type=str, default=data_path('hhsuite_pdb_seq_v2.h5'))
-    parser.add_argument("--rama_h5_path", type=str, default=data_path('hhsuite_rama_cullpdb.h5'))
+    parser.add_argument("--rama_h5_path", type=str, default=data_path('hhsuite_rama_v2.h5'))
     parser.add_argument("--rama_dataset_name", type=str, default='rama')
 
     args = parser.parse_args()

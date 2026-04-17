@@ -143,7 +143,7 @@ def get_local_gen_parser():
     parser.add_argument("--seq_h5_path", type=str,
                         default=data_path('hhsuite_pdb_seq_v2.h5'))
     parser.add_argument("--rama_h5_path", type=str,
-                        default=data_path('hhsuite_rama_cullpdb.h5'))
+                        default=data_path('hhsuite_rama_v2.h5'))
     parser.add_argument("--rama_dataset_name", type=str, default='rama')
 
     parser.add_argument("--save_path", type=str, default='./runs/')

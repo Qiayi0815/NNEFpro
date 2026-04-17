@@ -1,0 +1,50 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+build/
+dist/
+
+# --- OS / editor junk ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+
+# --- Notebooks ---
+.ipynb_checkpoints/
+
+# --- NNEF training artifacts ---
+# Keep run/experiment dirs untracked by default; the checkpoints that matter
+# for the repo (params/exp1/, runs/exp1/, nnef/runs/exp1/) are already staged
+# and remain tracked because git ignores rules only affect UNTRACKED files.
+runs/**/models/*.pt
+runs/**/tensorboard/
+runs/**/events.out.*
+nnef/runs/**/models/*.pt
+nnef/runs/**/tensorboard/
+nnef/runs/**/events.out.*
+
+# Treat large bundled caches as untracked unless explicitly added.
+# (nnef/data/*.h5 and nnef/data/decoys/ are big; track selectively.)
+nnef/data/*.h5.tmp
+nnef/data/*.backup
+
+# --- Test / scratch outputs ---
+*.log
+*.out
+nnef/scripts/**/*.npy
+nnef/scripts/**/*.h5
+
+# --- Secrets / local config (just in case) ---
+.env
+.env.*
+!.env.example
