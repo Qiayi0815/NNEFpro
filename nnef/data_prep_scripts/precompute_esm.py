@@ -92,6 +92,25 @@ def _decode_wt(seq_row: np.ndarray, idx2aa: List[str]) -> str:
 # Model loader: keep ESM-C as the primary path, with a best-effort fallback   #
 # to fair-esm ESM2 so this script is still useful if ``esm`` isn't available. #
 # --------------------------------------------------------------------------- #
+def _infer_esmc_width(client: torch.nn.Module) -> int:
+    """Embedding width for ESM-C, compatible across `esm` versions."""
+    ed = getattr(client, "embed_dim", None)
+    if ed is not None:
+        return int(ed)
+    emb = getattr(client, "embed", None)
+    if emb is not None:
+        w = getattr(emb, "embedding_dim", None)
+        if w is not None:
+            return int(w)
+        w = getattr(emb, "weight", None)
+        if w is not None and w.ndim >= 2:
+            return int(w.shape[1])
+    raise AttributeError(
+        "Cannot infer ESM-C embedding width: ESMC has no `embed_dim` and no "
+        "`embed` table (upgrade/downgrade the `esm` package or report this)."
+    )
+
+
 class ESMEmbedder:
     """Thin wrapper over the model + tokenizer so the main loop is
     family-agnostic. ``embed(seq)`` returns ``(L, d_esm)`` float16 numpy.
@@ -119,7 +138,9 @@ class ESMEmbedder:
                 ) from exc
             client = ESMC.from_pretrained(model_name).to(self.device).to(self.dtype)
             client.eval()
-            d_esm = int(client.embed_dim)
+            # Older `esm` exposed `embed_dim` on ESMC; current OSS ESMC only stores
+            # width on the token embedding table (`nn.Embedding.embedding_dim`).
+            d_esm = _infer_esmc_width(client)
             return 'esmc', client, d_esm
 
         if model_name.startswith('esm2_'):
