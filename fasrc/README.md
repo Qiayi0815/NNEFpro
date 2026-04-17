@@ -24,7 +24,6 @@ precompute. You package raw bead/chimeric CSVs into `.h5` on your laptop
 | `sync_3drobot_decoys_to_cluster.sh`   | Laptop: rsync `nnef/data/decoys/3DRobot_set/` (beads + lists) to Cannon. |
 | `sync_runs_to_cluster.sh`             | Laptop: push selected `runs/<exp>/` checkpoints when cluster lacks them. |
 | `eval_3drobot_batch.slurm`            | Cannon: GPU batch job → `python nnef/scripts/batch_eval_3drobot.py --device cuda`. |
-| `eval_v1_pure_rama_v2_casp14_3drobot.slurm` | Cannon: **only** `runs/v1_pure_rama_v2_<JOBID>` on CASP14 + 3DRobot (after rama-v2 train finishes). |
 | `pull_models_from_cluster.sh`       | Laptop: pull `runs/<exp>/` or `--all-final` (every `models/model.pt`). |
 
 ## Ablation matrix
@@ -254,6 +253,18 @@ ls runs/v3_full_<JOBID>/models/model.pt            # e.g. no-Rama v3: v3_full_62
 sbatch --export=ALL,V3_RUN=runs/v3_full_6223467,DATA_DIR=$HOME/nnef_data \
   fasrc/eval_yang_v1_v2_casp14_3drobot.slurm
 ```
+
+### v1_pure + Rama v2 only (extra checkpoint, no clash with Yang+v1+v2 eval)
+
+Outputs go to `eval/<run_basename>_casp14_3drobot/` and `decoy_loss_<run_basename>/`, not`v1_pure_ckpt`. To **avoid two GPU eval jobs at once**, chain after your main eval:
+
+```bash
+cd ~/nnef
+sbatch --dependency=afterok:<MAIN_EVAL_JOBID> fasrc/eval_v1_pure_rama_v2_only.slurm
+# e.g. sbatch --dependency=afterok:6259187 fasrc/eval_v1_pure_rama_v2_only.slurm
+```
+
+Or if the main eval has finished: `sbatch fasrc/eval_v1_pure_rama_v2_only.slurm`
 
 ## Partition cheat-sheet
 
