@@ -145,5 +145,11 @@ sbatch script (or source them in an interactive session):
   set +u
   conda activate $ENV_PREFIX
   set -u
+  export PYTHONNOUSERSITE=1
+
+Avoid ``pip install --user`` for numpy/scipy/torch: packages under
+``~/.local/lib/python3.10/site-packages`` can shadow the conda env and fail
+with missing shared libraries (e.g. libquadmath). Use ``PYTHONNOUSERSITE=1``
+or remove the broken trees under ~/.local.
 
 EOF

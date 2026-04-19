@@ -116,6 +116,11 @@ class ProteinBase:
     ref_scale = 400.0
     use_ref = False
     energy_model_type = None
+    # When True and N/CA/C are supplied on Protein, get_local_struct matches
+    # ``data_prep_scripts.local_extractor_v2`` (same frame, reorder, start_id).
+    # Set False via ``--legacy_local_frame`` for old Yang-style rotation only.
+    use_local_frame_v2 = True
+    struct_v2_dist_cutoff = 20.0
     # Inference-side feature-extraction switches. Mirror the training-side
     # flags on options.py; set by utils.test_setup. Default to False so any
     # code path that predates these additions stays bit-identical.
@@ -143,12 +148,23 @@ class Protein(ProteinBase):
     """
 
     def __init__(self, seq, coords, profile,
-                 esm_full=None, dihedral_full=None, protein_id=None):
+                 esm_full=None, dihedral_full=None, protein_id=None,
+                 n_coords=None, ca_coords=None, c_coords=None,
+                 chain_group_num=None):
         super().__init__()
         self.seq = seq  # (N,)
-        self.coords = coords  # (N, 3)
+        self.coords = coords  # (N, 3) — Cβ (or CA) bead used as ``CB`` in v2
         self.coords_int = None
         self.profile = profile  # (N, E) for evolution profile, (N,) for residues
+        # Optional full backbone for v2 local frames (N, CA, C). When all three
+        # are set and use_local_frame_v2 is True, get_local_struct matches
+        # ``local_extractor_v2`` training blocks.
+        self.n_coords = n_coords
+        self.ca_coords = ca_coords
+        self.c_coords = c_coords
+        # Bead ``group_num`` column (PDB residue ids), shape (N,). If None,
+        # chain indices 0..N-1 are assumed for terminal/interior rules.
+        self.chain_group_num = chain_group_num
         # Optional per-residue ESM embedding for the full chain, shape
         # (N, d_esm_in). Stored as-is (float16 or float32); `_gather_esm_local`
         # casts to coords.dtype at gather time. Left as None when --use_esm
@@ -177,6 +193,20 @@ class Protein(ProteinBase):
         self.energy_ref = self.energy_ref.to(self.coords.device)
         self.energy_seq = torch.mean(self.energy_ref[profile]) * self.ref_scale
         self.protein_id = protein_id
+        if n_coords is not None and ca_coords is not None and c_coords is not None:
+            assert n_coords.shape == coords.shape, 'n_coords shape mismatch'
+            assert ca_coords.shape == coords.shape, 'ca_coords shape mismatch'
+            assert c_coords.shape == coords.shape, 'c_coords shape mismatch'
+        if chain_group_num is not None:
+            assert chain_group_num.shape[0] == coords.shape[0], (
+                'chain_group_num length mismatch')
+
+    def _has_v2_backbone(self):
+        return (
+            self.n_coords is not None
+            and self.ca_coords is not None
+            and self.c_coords is not None
+        )
 
     def update_coords(self, coords):
         self.coords = coords
@@ -401,6 +431,177 @@ class Protein(ProteinBase):
         return R
 
     def get_local_struct(self):
+        """Local blocks for energy evaluation.
+
+        When ``ProteinBase.use_local_frame_v2`` and N/CA/C tensors are present,
+        blocks match ``local_extractor_v2`` / ``hhsuite_CB_v2.h5`` training
+        (intra-residue N–CA–C frame, Cβ coordinates, ``_re_order_block``,
+        ``start_id`` from ``seg``). Otherwise falls back to the historical
+        neighbor-bead rotation (or if the chain is shorter than 15 residues).
+        """
+        if (ProteinBase.use_local_frame_v2 and self._has_v2_backbone()
+                and self.coords.size(0) >= 15):
+            return self._get_local_struct_v2()
+        return self._get_local_struct_legacy()
+
+    def _get_local_struct_v2(self):
+        """Mirror ``extract_blocks_v2`` + ``_re_order_block`` on the inference chain."""
+        try:
+            from data_prep_scripts.local_extractor_v2 import (
+                compute_local_frame,
+                _re_order_block,
+            )
+        except ImportError:  # pragma: no cover
+            from nnef.data_prep_scripts.local_extractor_v2 import (  # type: ignore
+                compute_local_frame,
+                _re_order_block,
+            )
+
+        device = self.coords.device
+        dtype = self.coords.dtype
+        N = self.coords.size(0)
+        k = self.k
+        block_size = 5 + k
+        CB = self.coords
+        CA = self.ca_coords
+        N_xyz = self.n_coords
+        C_xyz = self.c_coords
+        cutoff = float(ProteinBase.struct_v2_dist_cutoff)
+
+        if self.chain_group_num is not None:
+            ids_list = [int(x) for x in self.chain_group_num.detach().cpu().tolist()]
+        else:
+            ids_list = list(range(N))
+        id_set = set(ids_list)
+        id_to_row = {gid: i for i, gid in enumerate(ids_list)}
+        sorted_ids = sorted(id_set)
+        first_two = set(sorted_ids[:2])
+        last_two = set(sorted_ids[-2:])
+
+        def row_to_gid(row: int) -> int:
+            return ids_list[row]
+
+        prof_rows, coord_rows, sid_rows, rc_rows, gl_rows = [], [], [], [], []
+
+        for cen_idx in range(N):
+            gc = ids_list[cen_idx]
+            n_np = N_xyz[cen_idx].detach().cpu().numpy().astype(np.float64)
+            ca_np = CA[cen_idx].detach().cpu().numpy().astype(np.float64)
+            c_np = C_xyz[cen_idx].detach().cpu().numpy().astype(np.float64)
+            R_np = compute_local_frame(n_np, ca_np, c_np)
+            if R_np is None:
+                continue
+            R = torch.tensor(R_np, device=device, dtype=dtype)
+
+            CA_cen = CA[cen_idx]
+            CB_cen = CB[cen_idx]
+            dist_glob = torch.norm(CB - CB_cen, dim=-1)
+
+            is_terminal = (gc in first_two) or (gc in last_two)
+
+            if is_terminal:
+                idx_combined = torch.argsort(dist_glob)[:block_size]
+                if idx_combined.numel() < block_size:
+                    continue
+                mask_others = torch.ones(N, dtype=torch.bool, device=device)
+                mask_others[idx_combined] = False
+                segment_info = np.full(block_size, 5, dtype=np.int32)
+            else:
+                surr = [gc - 2, gc - 1, gc, gc + 1, gc + 2]
+                if not all(s in id_to_row for s in surr):
+                    continue
+                idx_window = torch.tensor(
+                    [id_to_row[s] for s in surr],
+                    device=device, dtype=torch.long,
+                )
+                window_mask = torch.zeros(N, dtype=torch.bool, device=device)
+                window_mask[idx_window] = True
+                if int(window_mask.sum().item()) != 5:
+                    continue
+                # Match extract_blocks_v2: forbid re-picking peptide-window rows in top-k
+                # (``np.where(mask_others, dist_glob, np.inf)`` with mask_others = ~window).
+                dist_sort = dist_glob.clone()
+                dist_sort[window_mask] = float('inf')
+                topk_idx = torch.argsort(dist_sort)[:k]
+                idx_combined = torch.cat([idx_window, topk_idx])
+                mask_others = ~window_mask
+                segment_info = np.full(block_size, 5, dtype=np.int32)
+                for j in range(block_size):
+                    gv = row_to_gid(int(idx_combined[j].item()))
+                    if gv == gc:
+                        segment_info[j] = 0
+                    elif gv == gc - 1:
+                        segment_info[j] = 1
+                    elif gv == gc + 1:
+                        segment_info[j] = 2
+                    elif gv == gc - 2:
+                        segment_info[j] = 3
+                    elif gv == gc + 2:
+                        segment_info[j] = 4
+
+            diff = CB[idx_combined] - CA_cen
+            cb_local = (R @ diff.T).T
+            cb_center_local = R @ (CB_cen - CA_cen)
+            dist_local = torch.norm(cb_local - cb_center_local.unsqueeze(0), dim=-1)
+
+            dist_others = dist_glob[mask_others]
+            c8 = int((dist_others < 8.0).sum().item())
+            c10 = int((dist_others < 10.0).sum().item())
+            c12 = int((dist_others < 12.0).sum().item())
+
+            if float(dist_local.max().item()) >= cutoff:
+                continue
+
+            gnums_df = np.array(
+                [row_to_gid(int(idx_combined[j].item())) for j in range(block_size)],
+                dtype=np.int64,
+            )
+            df_blk = pd.DataFrame({
+                'segment': segment_info,
+                'group_num': gnums_df,
+                'local_x': cb_local[:, 0].detach().cpu().numpy(),
+                'local_y': cb_local[:, 1].detach().cpu().numpy(),
+                'local_z': cb_local[:, 2].detach().cpu().numpy(),
+                'distance': dist_local.detach().cpu().numpy(),
+                'count8a': c8,
+                'count10a': c10,
+                'count12a': c12,
+            })
+            df_o = _re_order_block(df_blk)
+            seg_o = df_o['seg'].values.astype(np.int8)
+            start_id_np = np.zeros_like(seg_o, dtype=np.int8)
+            start_id_np[1:] = (seg_o[1:] == seg_o[:-1]).astype(np.int8)
+
+            g_row = torch.tensor(
+                [id_to_row[int(gv)] for gv in df_o['group_num'].values],
+                device=device, dtype=torch.long,
+            )
+            cb_o = torch.tensor(
+                df_o[['local_x', 'local_y', 'local_z']].values,
+                device=device, dtype=dtype,
+            )
+            rc = torch.tensor(
+                df_o[['count8a', 'count10a', 'count12a']].values[0],
+                device=device, dtype=dtype,
+            )
+
+            prof_rows.append(self.profile[g_row])
+            coord_rows.append(cb_o)
+            sid_rows.append(torch.tensor(start_id_np, device=device, dtype=torch.long))
+            rc_rows.append(rc)
+            gl_rows.append(g_row)
+
+        if not prof_rows:
+            return self._get_local_struct_legacy()
+
+        profile_local = torch.stack(prof_rows, dim=0)
+        coords_local = torch.stack(coord_rows, dim=0)
+        start_id = torch.stack(sid_rows, dim=0)
+        res_counts = torch.stack(rc_rows, dim=0)
+        g_local = torch.stack(gl_rows, dim=0)
+        return profile_local, coords_local, start_id, res_counts, g_local
+
+    def _get_local_struct_legacy(self):
         group_coords = self.coords
         group_profile = self.profile
         # done in parallel for all residues. group_coords: (N, 3), group_profile: (N, E)
@@ -520,7 +721,7 @@ class Protein(ProteinBase):
     def _gather_esm_local(self, g_local):
         """Gather per-block ESM slices from the full-chain cache.
 
-        Returns a tensor of shape ``(N-4, 5+k, d_esm_in)`` cast to the
+        Returns a tensor of shape ``(num_blocks, 5+k, d_esm_in)`` cast to the
         protein's coord dtype (float32 in normal use), or ``None`` if
         ``self.use_esm`` is off / no cache was supplied.
 
@@ -544,7 +745,7 @@ class Protein(ProteinBase):
     def _gather_dihedral_local(self, g_local):
         """Gather per-block backbone dihedrals, encoded as sin/cos 4-d.
 
-        Returns a tensor shaped ``(N-4, 5+k, 4)`` = (sin phi, cos phi, sin psi,
+        Returns a tensor shaped ``(num_blocks, 5+k, 4)`` = (sin phi, cos phi, sin psi,
         cos psi) cast to coord dtype, or ``None`` when ``use_dihedral`` is off
         or no chain-level dihedral cache was supplied.
 
@@ -558,7 +759,7 @@ class Protein(ProteinBase):
         L_chain = self.dihedral_full.shape[0]
         invalid_idx = (g_local < 0) | (g_local >= L_chain)
         clamped = g_local.clamp(min=0, max=L_chain - 1)
-        phi_psi = self.dihedral_full[clamped]  # (N-4, 5+k, 2)
+        phi_psi = self.dihedral_full[clamped]  # (num_blocks, 5+k, 2)
         nan_mask = torch.isnan(phi_psi).any(dim=-1) | invalid_idx
         phi_psi = torch.nan_to_num(phi_psi, nan=0.0, posinf=0.0, neginf=0.0)
         sin_pp = torch.sin(phi_psi)

@@ -35,6 +35,13 @@ def test_setup(args):
     from model import LocalTransformer
 
     device = torch.device(args.device)
+    if device.type == 'cuda' and not torch.cuda.is_available():
+        raise RuntimeError(
+            'CUDA was requested (--device cuda) but no GPU is visible on this '
+            'machine (common on Slurm login nodes, e.g. holylogin*). Allocate a '
+            'GPU (salloc/sbatch on the gpu partition), or pass --device cpu '
+            'for a slow CPU-only run.'
+        )
 
     model = LocalTransformer(args)
     energy_fn = EnergyFun(model, args)
@@ -52,6 +59,8 @@ def test_setup(args):
               f"missing={sorted(missing)}, unexpected={sorted(unexpected)}")
     model.to(device)
     model.eval()
+    # Move loss head buffers (e.g. position_weights) that are not on ``model`` itself.
+    energy_fn.to(device)
 
     ProteinBase.k = args.seq_len - 4
     ProteinBase.use_graph_net = args.use_graph_net
@@ -60,6 +69,10 @@ def test_setup(args):
     ProteinBase.seq_offset_max = int(getattr(args, 'seq_offset_max', 64))
     ProteinBase.use_esm = bool(getattr(args, 'use_esm', False))
     ProteinBase.use_dihedral = bool(getattr(args, 'use_dihedral', False))
+    ProteinBase.use_local_frame_v2 = not bool(
+        getattr(args, 'legacy_local_frame', False))
+    ProteinBase.struct_v2_dist_cutoff = float(
+        getattr(args, 'struct_dist_cutoff', 20.0))
 
     return device, model, energy_fn, ProteinBase
 
@@ -299,6 +312,9 @@ def load_protein_decoy(pdb_id, decoy_id, mode, device, args):
     profile_set = 'pdb_profile_training_100'
 
     df_beads = pd.read_csv(data_path('decoys', decoy_set, pdb_id, f'{decoy_id}_bead.csv'))
+    # Match ``local_extractor_v2`` / training: blocks assume residue rows sorted by group_num.
+    if 'group_num' in df_beads.columns:
+        df_beads = df_beads.sort_values('group_num').reset_index(drop=True)
 
     seq_type = args.seq_type
     if seq_type != 'residue':
@@ -341,7 +357,33 @@ def load_protein_decoy(pdb_id, decoy_id, mode, device, args):
     else:
         dihedral_full = None
 
-    return seq, coords, profile, dihedral_full
+    if 'group_num' in df_beads.columns:
+        chain_group_num = torch.from_numpy(
+            df_beads['group_num'].values.astype(np.int64)
+        ).to(device=device)
+    else:
+        chain_group_num = torch.arange(
+            len(df_beads), device=device, dtype=torch.long,
+        )
+
+    req_bb = ('xn', 'yn', 'zn', 'xca', 'yca', 'zca', 'xc', 'yc', 'zc')
+    if all(col in df_beads.columns for col in req_bb):
+        n_xyz = torch.tensor(
+            df_beads[['xn', 'yn', 'zn']].values,
+            dtype=torch.float, device=device,
+        )
+        ca_xyz = torch.tensor(
+            df_beads[['xca', 'yca', 'zca']].values,
+            dtype=torch.float, device=device,
+        )
+        c_xyz = torch.tensor(
+            df_beads[['xc', 'yc', 'zc']].values,
+            dtype=torch.float, device=device,
+        )
+    else:
+        n_xyz = ca_xyz = c_xyz = None
+
+    return seq, coords, profile, dihedral_full, n_xyz, ca_xyz, c_xyz, chain_group_num
 
 
 def extract_beads(pdb_path):

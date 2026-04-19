@@ -56,6 +56,7 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4}
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
+export PYTHONNOUSERSITE=1
 
 # Verify the `esm` package (EvolutionaryScale) is importable; fail early with
 # a clear message if the user still has only `fair-esm`.

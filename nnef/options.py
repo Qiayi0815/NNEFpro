@@ -78,6 +78,19 @@ def get_common_parser():
 
     parser.add_argument("--debug", action='store_true', default=False)
 
+    # Inference / Protein: match local_extractor_v2 (training) local frame & blocks.
+    parser.add_argument(
+        "--legacy_local_frame", action='store_true', default=False,
+        help="Use the old Yang-style neighbor-bead rotation in Protein.get_local_struct "
+             "instead of the v2 N–CA–C intra-residue frame. Ignored when N/CA/C "
+             "backbone tensors are missing (legacy is forced).",
+    )
+    parser.add_argument(
+        "--struct_dist_cutoff", type=float, default=20.0,
+        help="Drop v2 blocks whose max within-block distance (Å) exceeds this; "
+             "matches local_extractor_v2 build-h5 --dist_cutoff (default 20).",
+    )
+
     # -----------------------------------------------------------------------
     # ESM-enhanced structural tokens (feature extraction boost, opt-in).
     # When --use_esm is OFF, the model, dataset tuple, and training step are

@@ -44,6 +44,8 @@ import argparse
 import os
 import sys
 
+print('[evaluate_decoys] importing numpy / scipy / pandas...', flush=True)
+import h5py
 import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr, spearmanr
@@ -56,6 +58,7 @@ _NNEF_DIR = os.path.abspath(os.path.join(_HERE, '..'))
 if _NNEF_DIR not in sys.path:
     sys.path.insert(0, _NNEF_DIR)
 
+print('[evaluate_decoys] importing nnef + torch (cold start can take ~1–2 min)...', flush=True)
 import options
 from decoy_score import (  # noqa: E402
     load_target_list,
@@ -120,6 +123,7 @@ def compute_correlations(df, pdb_id, decoy_set):
 # --------------------------------------------------------------------------- #
 
 def run_scoring_mode(args):
+    print('[evaluate_decoys] run_scoring_mode: building model and loading checkpoint...', flush=True)
     if args.out_dir in ('eval/default', 'eval\\default') and args.exp_tag == 'eval':
         print(
             '[evaluate_decoys] WARNING: generic --out_dir eval/default and '
@@ -273,15 +277,21 @@ def _plot_scatter(df, pdb_id, decoy_set, row, out_dir):
     import matplotlib.pyplot as plt
     x = sub[metric].values.astype(float)
     y = sub['loss'].values.astype(float)
+    n_plotted = len(sub)
+    # Many decoys can share identical (metric, loss) → markers stack; counts explain "few dots".
+    n_unique_xy = sub[[metric, 'loss']].drop_duplicates().shape[0]
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.scatter(x, y, s=20, alpha=0.8)
+    ax.scatter(x, y, s=16, alpha=0.55, edgecolors='none')
     if len(sub) >= 2 and np.std(x) > 0:
         slope, intercept = np.polyfit(x, y, 1)
         xf = np.linspace(x.min(), x.max(), 100)
         ax.plot(xf, slope * xf + intercept, color='red', lw=1.0)
     ax.set_xlabel(metric)
     ax.set_ylabel('Energy score (loss)')
-    ax.set_title(f'{pdb_id}  ({decoy_set})  N={row["n_decoys"]}')
+    ax.set_title(
+        f'{pdb_id}  ({decoy_set})  rows={row["n_decoys"]}  '
+        f'plotted={n_plotted}  unique (x,y)={n_unique_xy}',
+    )
     ax.text(
         0.02, 0.98,
         f'Pearson r = {row["pearson_r"]:+.3f}  p = {row["pearson_p"]:.2g}\n'

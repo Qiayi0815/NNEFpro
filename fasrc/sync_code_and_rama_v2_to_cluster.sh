@@ -18,12 +18,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 echo "==> [1/2] rsync code -> ${REMOTE_HOST}:${REMOTE_REPO}"
+echo "    (decoys are NOT included — use fasrc/sync_3drobot_decoys_to_cluster.sh etc.)"
 rsync -avh --progress \
   --exclude='.git/' \
   --exclude='__pycache__/' \
   --exclude='runs/' \
   --exclude='params/' \
   --exclude='nnef/data/*.h5' \
+  --exclude='nnef/data/decoys/' \
   --exclude='data_hh/' \
   --exclude='*.pdf' \
   ./ "${REMOTE_HOST}:${REMOTE_REPO}/"

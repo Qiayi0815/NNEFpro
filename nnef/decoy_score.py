@@ -198,10 +198,17 @@ def score_target(pdb_id, decoy_set, decoy_loss_dir, args, device, energy_fn,
     else:
         # ESM cache lookup is done once per target because every decoy of the
         # same target shares the WT sequence.
+        n_decoys = len(decoy_list)
+        print(
+            f'[score_target] {pdb_id} ({decoy_set}): {n_decoys} decoys '
+            f'(progress every 100)...',
+            flush=True,
+        )
         esm_full_np = _lookup_esm(esm_h5, pdb_id) if esm_h5 is not None else None
-        for decoy in decoy_list:
+        for j, decoy in enumerate(decoy_list):
             decoy_id = _decoy_id_for(decoy, decoy_set)
-            seq, coords_native, profile, dihedral_full = load_protein_decoy(
+            (seq, coords_native, profile, dihedral_full,
+             n_xyz, ca_xyz, c_xyz, chain_group_num) = load_protein_decoy(
                 pdb_id, decoy_id, args.mode, device, args
             )
             esm_full = None
@@ -228,6 +235,8 @@ def score_target(pdb_id, decoy_set, decoy_loss_dir, args, device, energy_fn,
             protein = Protein(
                 seq, coords_native, profile,
                 esm_full=esm_full, dihedral_full=dihedral_full,
+                n_coords=n_xyz, ca_coords=ca_xyz, c_coords=c_xyz,
+                chain_group_num=chain_group_num,
             )
             energy = protein.get_energy(energy_fn).item()
 
@@ -238,6 +247,13 @@ def score_target(pdb_id, decoy_set, decoy_loss_dir, args, device, energy_fn,
                 minimizer.run()
                 energy = minimizer.energy_best
             loss_all.append(energy)
+            # Progress: one forward per decoy; full targets can take many minutes.
+            _step = j + 1
+            if _step % 100 == 0 or _step == n_decoys:
+                print(
+                    f'[score_target] {pdb_id}: {_step}/{n_decoys} decoys',
+                    flush=True,
+                )
 
     if len(loss_all) == 0:
         print(f'[score_target] {pdb_id}: empty decoy list')

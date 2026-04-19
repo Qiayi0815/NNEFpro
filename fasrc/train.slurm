@@ -67,6 +67,7 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
+export PYTHONNOUSERSITE=1
 
 # ----------------------------------------------------------------------------
 # 3. Print node / GPU info to the log for later debugging.

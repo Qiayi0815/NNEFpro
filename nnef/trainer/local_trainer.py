@@ -11,7 +11,8 @@ from model import LocalEnergyCE
 class LocalGenTrainer:
     def __init__(self, writer, model, device, args):
         self.model = model
-        self.energy_fn = LocalEnergyCE(model, args)
+        # LocalEnergyCE holds buffers (e.g. position_weights); must match model device.
+        self.energy_fn = LocalEnergyCE(model, args).to(device)
 
         self.device = device
 

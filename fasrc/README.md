@@ -18,13 +18,21 @@ precompute. You package raw bead/chimeric CSVs into `.h5` on your laptop
 | `train.slurm`              | **v2_cart_offset**: `--use_cart_coords --use_seq_offset` (no ESM).          |
 | `train_v2_dihedral.slurm`  | **v2 + dihedral**: same as `train.slurm` + `--use_dihedral` (no ESM).       |
 | `train_v1_pure.slurm`      | **v1_pure** baseline: no `--use_` flags, bit-identical to 2022 NNEF.        |
+| `train_yang_style.slurm`   | Retrain **Yang-style** (`--mixture_seq 1 --legacy_local_frame`, no cart/ESM) on v2 HDF5 → `runs/yang_retrain_<JOBID>/`. |
 | `train_v3_full.slurm`      | **v3_full** full stack: cart + offset + ESM-C 600M + phi/psi dihedral.      |
 | `precompute_esm.slurm`     | One-off: ESM-C 600M per-residue cache -> `hhsuite_esm_v2.h5`.               |
 | `sync_code_and_rama_v2_to_cluster.sh` | Laptop: rsync code + v2/rama h5 to FASRC (see script header).        |
 | `sync_3drobot_decoys_to_cluster.sh`   | Laptop: rsync `nnef/data/decoys/3DRobot_set/` (beads + lists) to Cannon. |
+| `sync_casp14_decoys_to_cluster.sh`    | Laptop: rsync `nnef/data/decoys/casp14/` (beads + lists; optional `CASP14_SRC=…`). |
 | `sync_runs_to_cluster.sh`             | Laptop: push selected `runs/<exp>/` checkpoints when cluster lacks them. |
 | `eval_3drobot_batch.slurm`            | Cannon: GPU batch job → `python nnef/scripts/batch_eval_3drobot.py --device cuda`. |
 | `pull_models_from_cluster.sh`       | Laptop: pull `runs/<exp>/` or `--all-final` (every `models/model.pt`). |
+| `pull_slurm_logs_from_cluster.sh`     | Laptop: pull `runs/slurm-<JOBID>.{out,err}` (training stdout; not inside `<exp>/`). |
+| `pull_eval_from_cluster.sh`           | Laptop: pull `eval/` (summary.csv, plots); optional `--with-decoys`, `--with-slurm-logs`. |
+| `pull_decoy_loss_from_cluster.sh`    | Laptop: pull only selected `nnef/data/decoys/<set>/decoy_loss_*` dirs (or `--all`). |
+| `eval_casp14_all_local.sh`           | Laptop/GPU: **CASP14-only** re-eval; Yang (`legacy`/`mixture_rama 0`) vs v1–v3 flags (see script header). |
+| `eval_v1v2v3_rama_casp14_only_local.sh` | Laptop: **six** CASP14-only evals (v1/v2/v3 + v1r/v2r/v3r) → `eval/<run>_casp14_only/`. |
+| `submit_v3_casp14_only.sh`           | Cannon: **two** GPU jobs, v3 pair, **CASP14 only** (no 3DRobot) → `eval/<run>_casp14_only/`. |
 
 ## Ablation matrix
 
@@ -94,6 +102,62 @@ rsync -avh --progress \
 
 Re-run step 2 whenever code changes. Step 1 + step 3 only when you want a
 fresh dataset.
+
+### A2. Laptop — pull checkpoints + training logs for TensorBoard / plots
+
+Checkpoints and TensorBoard events live under `runs/<exp_id>/` on the cluster.
+Training **Slurm** text logs are separate files at `runs/slurm-<JOBID>.{out,err}`
+(use the training job’s numeric ID).
+
+```bash
+cd /path/to/nnef
+chmod +x fasrc/pull_slurm_logs_from_cluster.sh
+
+# One or more experiment folders (models/, events.out.tfevents.*, …)
+# Original v1 / v2 (ablation baselines) + four “stacked” runs (rama v2 / v3 / …):
+bash fasrc/pull_models_from_cluster.sh \
+  v1_pure_6171704 v2_run_6160264 \
+  v1_pure_rama_v2_6228201 \
+  v2_dihedral_rama_v2_6228517 v3_full_6223467 v3_full_rama_v2_6229240
+
+# Match the training JOBIDs for those runs (see cluster: ls ~/nnef/runs/slurm-*.out)
+bash fasrc/pull_slurm_logs_from_cluster.sh \
+  6171704 6160264 6228201 6228517 6223467 6229240
+
+# Browse runs locally
+tensorboard --logdir runs --port 6006
+
+# Static PDFs from event files (after pulls land under runs/<exp>/)
+# Default x-axis is epoch (global_step / steps_per_epoch); auto-infers steps/epoch or use --steps_per_epoch 1000
+python nnef/scripts/plot_training_tensorboard.py \
+  --runs runs/v1_pure_6171704 runs/v2_run_6160264 \
+        runs/v1_pure_rama_v2_6228201 \
+        runs/v2_dihedral_rama_v2_6228517 runs/v3_full_6223467 runs/v3_full_rama_v2_6229240 \
+  --out_dir figures/training_compare
+```
+
+Slurm `.out` files are plain text: `grep 'coords_rama_loss:' runs/slurm-6229240.out`, etc.
+
+### A3. Laptop — pull evaluation results (after GPU eval on Cannon)
+
+```bash
+cd /path/to/nnef
+chmod +x fasrc/pull_eval_from_cluster.sh
+# summary.csv + plots under eval/<run>_casp14_3drobot/
+bash fasrc/pull_eval_from_cluster.sh
+# Optional: GPU eval Slurm logs
+bash fasrc/pull_eval_from_cluster.sh --with-slurm-logs
+
+# Per-target decoy_loss CSVs (pick folders; smaller than full --with-decoys)
+chmod +x fasrc/pull_decoy_loss_from_cluster.sh
+bash fasrc/pull_decoy_loss_from_cluster.sh \
+  casp14/decoy_loss_yang_exp1 \
+  casp14/decoy_loss_v1_pure_rama_v2_6228201 \
+  3DRobot_set/decoy_loss_v1_pure_rama_v2_6228201
+# Entire tree: bash fasrc/pull_decoy_loss_from_cluster.sh --all
+```
+
+`v2_run_6160264` is **v2_cart_offset** (`train.slurm`). If you want **v2 + dihedral** without Rama instead, swap in `runs/v2_dihedral_6172503` and pull `v2_dihedral_6172503` / Slurm `6172503`.
 
 ### B. On FASRC — one-time environment setup
 
@@ -242,7 +306,7 @@ sbatch --export=ALL,EXTRA_ARGS='--targets 1C5EA' fasrc/eval_3drobot_batch.slurm
 
 `fasrc/eval_yang_v1_v2_casp14_3drobot.slurm` runs three checkpoints by default.
 After **`train_v3_full.slurm`** completes, re-submit with **`V3_RUN`** set to the
-new directory (e.g. `runs/v3_full_rama_v2_6223467`) so step (4) runs and the
+new directory (e.g. `runs/v3_full_rama_v2_6229240`) so step (4) runs and the
 merged `comparison.csv` includes v3. Requires **`$DATA_DIR/hhsuite_esm_v2.h5`**.
 
 ```bash
@@ -265,6 +329,25 @@ sbatch --dependency=afterok:<MAIN_EVAL_JOBID> fasrc/eval_v1_pure_rama_v2_only.sl
 ```
 
 Or if the main eval has finished: `sbatch fasrc/eval_v1_pure_rama_v2_only.slurm`
+
+### Parallel eval: v2_dihedral+Rama, v3 (no-rama name), v3_full_rama_v2
+
+Three **independent** GPU jobs (different logs / `eval/<run>_casp14_3drobot/` — safe to submit together):
+
+```bash
+cd ~/nnef
+# v2 dihedral + Rama v2 (default LOAD_EXP matches train_v2_dihedral.slurm naming)
+sbatch fasrc/eval_v2_dihedral_rama_casp14_3drobot.slurm
+
+# v3 without rama in folder name (edit JOBID if needed)
+sbatch --export=ALL,LOAD_EXP=runs/v3_full_6223467,DATA_DIR=$HOME/nnef_data fasrc/eval_v3_full_casp14_3drobot.slurm
+
+# v3 + Rama (default LOAD_EXP=runs/v3_full_rama_v2_6229240; override JOBID if needed)
+# If the run folder was saved as v3_full_<JOBID>, rename once: mv runs/v3_full_6229240 runs/v3_full_rama_v2_6229240
+sbatch --export=ALL,DATA_DIR=$HOME/nnef_data fasrc/eval_v3_full_rama_v2_casp14_3drobot.slurm
+```
+
+v3 jobs need ``$DATA_DIR/hhsuite_esm_v2.h5``. Shared driver: ``fasrc/eval_one_run_casp14_3drobot.sh``.
 
 ## Partition cheat-sheet
 

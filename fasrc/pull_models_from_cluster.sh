@@ -4,8 +4,9 @@
 #
 # Usage
 # -----
-#   # One experiment (full run dir: tensorboard, logs, …)
+#   # One or more experiments (full run dirs: models/, tensorboard events, …)
 #   bash fasrc/pull_models_from_cluster.sh v2_dihedral_rama_v2_6228517
+#   bash fasrc/pull_models_from_cluster.sh v3_full_6223467 v3_full_rama_v2_6229240
 #
 #   # One experiment: only models/*.pt
 #   ONLY_PT=1 bash fasrc/pull_models_from_cluster.sh v3_full_rama_v2_6223467
@@ -18,6 +19,9 @@
 #
 #   # Entire runs/ tree (very large)
 #   bash fasrc/pull_models_from_cluster.sh --all-runs
+#
+# Training Slurm text logs (slurm-<JOBID>.out) are under runs/ on the cluster root, not
+# inside each exp folder — use fasrc/pull_slurm_logs_from_cluster.sh with the JOBIDs.
 #
 # Override: REMOTE_HOST, REMOTE_REPO
 
@@ -119,14 +123,16 @@ case "${1:-}" in
     pull_all_models_dir
     ;;
   '')
-    echo "usage: $0 <exp_id_under_runs>"
+    echo "usage: $0 <exp_id_under_runs> [<exp_id> ...]"
     echo "       $0 --all-final      # every runs/*/models/model.pt"
     echo "       $0 --all-models    # every runs/*/models/ (all checkpoints)"
     echo "       $0 --all-runs      # entire runs/"
     exit 1
     ;;
   *)
-    pull_exp "$1"
-    echo "Done. Local: ${LOCAL_RUNS}/$1/models/"
+    for exp in "$@"; do
+      pull_exp "${exp}"
+      echo "Done exp: ${LOCAL_RUNS}/${exp}/models/"
+    done
     ;;
 esac

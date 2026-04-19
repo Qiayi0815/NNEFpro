@@ -120,7 +120,9 @@ class LocalTransformer(nn.Module):
             dim_feedforward=hidden * 4, dropout=args.dropout
         )
 
-        mask = torch.tril(torch.ones((args.seq_len + 1, args.seq_len + 1), device=args.device))
+        # Build on CPU so constructing the model does not require a GPU (e.g. login nodes);
+        # buffers follow ``module.to(device)`` in ``test_setup`` / training.
+        mask = torch.tril(torch.ones((args.seq_len + 1, args.seq_len + 1)))
         mask = mask.masked_fill((mask == 0), float('-inf')).masked_fill(mask == 1, float(0.0))
         self.register_buffer('mask', mask)
 
@@ -431,11 +433,10 @@ class LocalEnergyCE(nn.Module):
         self.coords_rama_loss_lamda = args.coords_rama_loss_lamda  # NEW
 
         if args.use_position_weights:
-            device = torch.device(args.device)
-            position_weights = torch.ones((1, args.seq_len + 1), device=device)
+            position_weights = torch.ones((1, args.seq_len + 1))
             position_weights[:, 0:5] *= args.cen_seg_loss_lamda
             position_weights[:, 5:] *= args.oth_seg_loss_lamda
-            self.position_weights = position_weights
+            self.register_buffer('position_weights', position_weights, persistent=False)
         else:
             self.position_weights = None
 

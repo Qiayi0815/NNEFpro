@@ -47,6 +47,7 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
+export PYTHONNOUSERSITE=1
 
 if [[ -f "$DATA_DIR/hhsuite_esm_v2.h5" ]]; then
   export NNEF_ESM_H5="$DATA_DIR/hhsuite_esm_v2.h5"

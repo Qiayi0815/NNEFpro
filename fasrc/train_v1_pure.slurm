@@ -55,6 +55,7 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
+export PYTHONNOUSERSITE=1
 
 echo "----- node info -----"
 hostname
