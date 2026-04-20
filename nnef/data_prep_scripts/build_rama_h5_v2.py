@@ -6,7 +6,11 @@ are computed from N/CA/C columns in the v2 bead CSV (same source as ``extract-be
 
 Schema (matches ``DatasetLocalGenCM`` / ``data_chimeric.py``)::
 
-    <PDB4>_<chain>/rama float32  (num_blocks, 15, 2)   # phi, psi; NaN where undefined
+    <PDB4>_<chain>/rama float32  (num_blocks, block_size, 2)
+                                  # phi, psi; NaN where undefined
+                                  # block_size = group_num.shape[1] from the
+                                  # reference CB h5 (= 5 + k); no longer hard-
+                                  # coded to 15 so k can vary per training run.
 
 Usage (from repo root, with ``nnef/`` package on ``PYTHONPATH``)::
 
@@ -76,7 +80,8 @@ def _process_key(task: Tuple[str, str, str]) -> Tuple[str, str, Optional[np.ndar
         if pdb_key not in h5:
             return 'bad_shape', pdb_key, None
         gn = h5[pdb_key]['group_num'][()]
-        if gn.ndim != 2 or gn.shape[1] != 15:
+        # Accept any block width (= 5 + k, whatever the CB h5 was built with).
+        if gn.ndim != 2 or gn.shape[1] < 6:
             return 'bad_shape', pdb_key, None
 
     df_all = pd.read_csv(bead_path)

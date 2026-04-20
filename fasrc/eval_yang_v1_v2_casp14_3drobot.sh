@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ----------------------------------------------------------------------------
 # CASP14 + 3DRobot_set decoy inference for:
-#   (1) Yang et al. pretrained exp1  (no Rama head, legacy local frame)
+#   (1) Yang baseline (legacy local frame): released params/exp1 (rama 0) or
+#       retrained runs/yang_retrain_<JOBID> (rama 10) — see fasrc/include/resolve_yang_checkpoint.sh
 #   (2) Your finished v1_pure run (v2 local frame, Rama head)
 #   (3) Your finished v2_run (v2 local frame + cart + offset, Rama head)
 #   (4) Optional v3_full (cart + offset + ESM + dihedral) if V3_RUN is set and ESM cache exists
@@ -37,8 +38,9 @@ export PYTHONNOUSERSITE="${PYTHONNOUSERSITE:-1}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 # ========================= CONFIG (edit) =====================================
-# Repo root (directory that contains the nnef/ package and runs/).
-REPO="${REPO:-$HOME/nnef}"
+# Repo root (directory that contains the nnef/ package and runs/). Override if needed.
+_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="${REPO:-$(cd "$_SCRIPT_DIR/.." && pwd)}"
 
 # Python: prefer explicit env binary so ``bash this.sh`` always matches training
 # (subshells sometimes resolve bare ``python`` to the module stack, not nnef).
@@ -61,9 +63,7 @@ DEVICE="${DEVICE:-cuda}"
 V1_RUN="${V1_RUN:-runs/v1_pure_6171704}"
 V2_RUN="${V2_RUN:-runs/v2_run_6160264}"
 
-# Yang pretrained exp1: README / fold_one use repo-root params/ (not under nnef/).
-# If yours lives elsewhere: YANG_CKPT=... bash fasrc/eval_yang_v1_v2_casp14_3drobot.sh
-YANG_CKPT="${YANG_CKPT:-$REPO/params/exp1/models/model.pt}"
+# Yang: YANG_CKPT / YANG_RUN / auto newest yang_retrain_* / else params/exp1 (see resolve include).
 
 OUT_YANG="${OUT_YANG:-eval/yang_exp1_casp14_3drobot}"
 TAG_YANG="${TAG_YANG:-yang_exp1}"
@@ -88,6 +88,11 @@ OUT_COMPARE="${OUT_COMPARE:-eval/compare_yang_v1_v2_casp14_3drobot}"
 # =============================================================================
 
 cd "$REPO"
+REPO="$(pwd -P)"
+
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "$0")" && pwd)/include/resolve_yang_checkpoint.sh"
+echo "[eval] Yang: $YANG_CKPT | mixture_rama=$YANG_MIXTURE_RAMA"
 
 if ! "${PY_IM[@]}" -c "import numpy, pandas, scipy, torch" 2>/dev/null; then
   echo "[eval] ERROR: $PY cannot import numpy/pandas/scipy/torch (try: rm -rf ~/.local/lib/python3.10/site-packages/numpy*)."
@@ -154,13 +159,13 @@ ARCH_SHARED=(
   --oth_seg_loss_lamda 3
 )
 
-echo "========== (1/3) Yang exp1: legacy local frame, mixture_rama=0 =========="
+echo "========== (1/3) Yang: legacy local frame, mixture_rama=$YANG_MIXTURE_RAMA =========="
 echo "[eval] $(date '+%Y-%m-%d %H:%M:%S') starting Python; first run may sit silent 30–120s while torch/CUDA loads."
 "${PY_IM[@]}" nnef/scripts/evaluate_decoys.py \
   "${DECOY_COMMON[@]}" \
   --load_checkpoint "$YANG_CKPT" \
   --mixture_seq 1 \
-  --mixture_rama 0 \
+  --mixture_rama "$YANG_MIXTURE_RAMA" \
   --legacy_local_frame \
   --exp_tag "$TAG_YANG" \
   --out_dir "$OUT_YANG" \

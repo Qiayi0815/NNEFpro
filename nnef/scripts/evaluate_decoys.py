@@ -102,6 +102,8 @@ def compute_correlations(df, pdb_id, decoy_set):
     if metric is None:
         return row
     sub = df[[metric, 'loss']].dropna()
+    # Rows actually used for correlations (avoids counting NaN losses from stale CSVs).
+    row['n_decoys'] = int(len(sub))
     if len(sub) < 3:
         return row
     x = sub[metric].values.astype(float)

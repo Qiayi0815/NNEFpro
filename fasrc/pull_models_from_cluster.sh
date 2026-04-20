@@ -4,6 +4,10 @@
 #
 # Usage
 # -----
+#   # Retrained Yang (train_yang_style.slurm → runs/yang_retrain_<JOBID>/)
+#   bash fasrc/pull_yang_retrain_from_cluster.sh <JOBID>
+#   ONLY_PT=1 bash fasrc/pull_yang_retrain_from_cluster.sh <JOBID>   # models/*.pt only
+#
 #   # One or more experiments (full run dirs: models/, tensorboard events, …)
 #   bash fasrc/pull_models_from_cluster.sh v2_dihedral_rama_v2_6228517
 #   bash fasrc/pull_models_from_cluster.sh v3_full_6223467 v3_full_rama_v2_6229240

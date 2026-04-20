@@ -43,6 +43,33 @@ def test_setup(args):
             'for a slow CPU-only run.'
         )
 
+    # Inference-side auto-detect of seq_len (= 5 + k - 1) from the checkpoint,
+    # mirroring the train-time auto-detect in DatasetLocalGenCM. Lets an
+    # unchanged decoy_score CLI score a model trained with any k value: we
+    # peek at pos_x_embed.weight (shape (seq_len + 1, E//4)) before building
+    # the model so position embeddings / attention mask size line up.
+    ckpt_path = resolve_model_checkpoint_path(args)
+    print(f'[test_setup] loading weights from {ckpt_path}')
+    state = torch.load(ckpt_path, map_location=torch.device('cpu'))
+    _ckpt_pos = state.get('pos_x_embed.weight')
+    if _ckpt_pos is not None:
+        _ckpt_seq_len = int(_ckpt_pos.shape[0]) - 1
+        if getattr(args, 'seq_len', None) is None:
+            args.seq_len = _ckpt_seq_len
+            print(f'[test_setup] auto-detected args.seq_len={args.seq_len} '
+                  f'(k={args.seq_len - 4}) from checkpoint.')
+        elif args.seq_len != _ckpt_seq_len:
+            raise ValueError(
+                f'--seq_len={args.seq_len} does not match checkpoint '
+                f'pos_x_embed (seq_len={_ckpt_seq_len}, k={_ckpt_seq_len - 4}). '
+                f'Pass --seq_len {_ckpt_seq_len} or omit it to auto-detect.'
+            )
+    elif getattr(args, 'seq_len', None) is None:
+        raise ValueError(
+            'Cannot infer --seq_len: checkpoint has no pos_x_embed.weight. '
+            'Pass --seq_len explicitly (block_size - 1, i.e. 5 + k - 1).'
+        )
+
     model = LocalTransformer(args)
     energy_fn = EnergyFun(model, args)
 
@@ -50,9 +77,6 @@ def test_setup(args):
     # loaded into an extended model whose extras are gated off or pre-
     # initialized to zero. Report what is missing / unexpected so the user
     # notices any silent mismatch.
-    ckpt_path = resolve_model_checkpoint_path(args)
-    print(f'[test_setup] loading weights from {ckpt_path}')
-    state = torch.load(ckpt_path, map_location=torch.device('cpu'))
     missing, unexpected = model.load_state_dict(state, strict=False)
     if missing or unexpected:
         print(f"[test_setup] load_state_dict(strict=False): "

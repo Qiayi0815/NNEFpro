@@ -28,6 +28,27 @@ class DatasetLocalGenCM(Dataset):
         if rama_h5_path is None:
             rama_h5_path = data_path('hhsuite_rama_v2.h5')
         self.seq_factor = args.seq_factor          # 0.5 与序列相关的参数
+        # Auto-detect block width (5 + k) from the structure h5 so training
+        # automatically matches whatever k was used at build time. Convention:
+        #   block_size = coords.shape[1]          (= 5 + k residues)
+        #   args.seq_len = block_size - 1          (excludes start-token slot)
+        #   self.seq_len = block_size              (includes start-token slot)
+        with h5py.File(pdb_h5_path, 'r', libver='latest', swmr=True) as _probe:
+            _probe_keys = list(_probe.keys())
+            if not _probe_keys:
+                raise ValueError(f'structure h5 is empty: {pdb_h5_path}')
+            _block_size = int(_probe[_probe_keys[0]]['coords'].shape[1])
+        if getattr(args, 'seq_len', None) is None:
+            args.seq_len = _block_size - 1
+            print(f'[DatasetLocalGenCM] auto-detected block_size={_block_size} '
+                  f'(k={_block_size - 5}) from {pdb_h5_path}; setting args.seq_len={args.seq_len}')
+        elif args.seq_len + 1 != _block_size:
+            raise ValueError(
+                f'--seq_len={args.seq_len} (block_size={args.seq_len + 1}) does not match '
+                f'the h5 block width {_block_size} (k={_block_size - 5}) in {pdb_h5_path}. '
+                f'Pass --seq_len {_block_size - 1} or omit --seq_len to auto-detect.'
+            )
+        self.block_size = _block_size              # = 5 + k
         self.seq_len = args.seq_len + 1            # 序列长度（包含起始符号位），模型将考虑的蛋白质片段的长度
         self.noise_factor = args.noise_factor      # 0.001 数据中的噪声因子
         self.seq_type = args.seq_type              # 指定使用的序列类型
@@ -104,7 +125,7 @@ class DatasetLocalGenCM(Dataset):
             self.res_counts_dict[pdb] = data_pdb['res_counts'][()]
             self.seq_dict[pdb] = hh_data_seq[pdb][()]
 
-            # NEW: 读取 Rama 矩阵 (num_blocks, 15, 2)，若没有则存 None
+            # NEW: 读取 Rama 矩阵 (num_blocks, block_size, 2)，若没有则存 None
             if self.has_rama and (pdb in hh_data_rama):
                 grp = hh_data_rama[pdb]
                 if rama_dataset_name in grp:
@@ -171,16 +192,14 @@ class DatasetLocalGenCM(Dataset):
         coords = self.coords_dict[pdb][i]
         res_counts = self.res_counts_dict[pdb][i]
 
-        # ---- NEW: 取出 Ramachandran 15x2 (若存在) ----
-        rama15 = None
+        # ---- NEW: 取出 Ramachandran block (若存在) ----
+        # 期望形状: (num_blocks, block_size, 2); block_size = 5 + k 由 h5 决定。
+        rama_blk = None
         if self.rama_dict[pdb] is not None:
-            # 期望形状: (num_blocks, 15, 2)
-            # 选择与本地结构同一个 i
             if i < self.rama_dict[pdb].shape[0]:
-                rama15 = self.rama_dict[pdb][i]  # (15, 2)
+                rama_blk = self.rama_dict[pdb][i]  # (block_size, 2)
             else:
-                # 若索引越界（理论上不应发生），则视作缺失
-                rama15 = None
+                rama_blk = None
 
         # Ensure seq_len does not exceed the length of the structure
         if self.seq_len > group_num.shape[0]:
@@ -237,31 +256,33 @@ class DatasetLocalGenCM(Dataset):
         res_counts = torch.tensor(res_counts, dtype=torch.float)
 
         # ---------------- NEW: 组织 Ramachandran 到 (L, 2) + mask (L,) ----------------
-        # 期望输入：rama15 (15, 2)，角度单位：弧度，区间(-pi, pi]（如需可在此处 wrap）
+        # 期望输入：rama_blk (block_size, 2)，角度单位：弧度；block_size = self.seq_len。
+        # 训练时 args.seq_len + 1 == block_size (由 __init__ 强制一致)，所以 L == B
+        # 是常见情形；保留 L != B 分支作为未来下游使用 (如降采样推理) 的兼容路径。
         L = self.seq_len
         rama_full = torch.zeros((L, 2), dtype=torch.float)   # (L, 2)
         rama_mask = torch.zeros((L,), dtype=torch.float)     # (L, )
 
-        if rama15 is not None:
-            # numpy -> torch
-            rama15 = torch.tensor(rama15, dtype=torch.float)  # (15, 2)
-            valid = torch.isfinite(rama15).all(dim=-1).float()  # (15,)
+        if rama_blk is not None:
+            rama_blk = torch.tensor(rama_blk, dtype=torch.float)  # (B, 2)
+            B = rama_blk.shape[0]
+            valid = torch.isfinite(rama_blk).all(dim=-1).float()  # (B,)
 
             # Wrap to (-pi, pi] only where defined; NaN -> 0 before wrap for stability
             pi = float(np.pi)
-            rama15_safe = torch.nan_to_num(rama15, nan=0.0, posinf=0.0, neginf=0.0)
-            rama15_safe = ((rama15_safe + pi) % (2 * pi)) - pi
+            rama_blk_safe = torch.nan_to_num(rama_blk, nan=0.0, posinf=0.0, neginf=0.0)
+            rama_blk_safe = ((rama_blk_safe + pi) % (2 * pi)) - pi
 
-            if L == 15:
-                rama_full[:] = rama15_safe
+            if L == B:
+                rama_full[:] = rama_blk_safe
                 rama_mask[:] = valid
-            elif L > 15:
-                start = (L - 15) // 2
-                end = start + 15
-                rama_full[start:end] = rama15_safe
+            elif L > B:
+                start = (L - B) // 2
+                end = start + B
+                rama_full[start:end] = rama_blk_safe
                 rama_mask[start:end] = valid
             else:
-                rama_full[:] = rama15_safe[:L]
+                rama_full[:] = rama_blk_safe[:L]
                 rama_mask[:] = valid[:L]
         else:
             # 没有 rama 数据：保持零与零 mask（下游可忽略这些位置）
@@ -278,7 +299,7 @@ class DatasetLocalGenCM(Dataset):
         # -------- Optional extras (see options.py for the flags) ----------
         L = self.seq_len
 
-        # (1) Per-residue ESM embedding for the 15-residue block.
+        # (1) Per-residue ESM embedding for the block (block_size = 5 + k).
         #     group_num (already shifted to 0-based above) gives the chain
         #     indices. If the ESM h5 doesn't have this PDB, or indices fall
         #     outside the cached sequence, the corresponding rows are zero.

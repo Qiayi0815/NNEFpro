@@ -163,7 +163,54 @@ def score_target(pdb_id, decoy_set, decoy_loss_dir, args, device, energy_fn,
     out_csv = os.path.join(out_dir, f'{pdb_id}_decoy_loss.csv')
 
     if skip_if_exists and os.path.exists(out_csv):
-        return pd.read_csv(out_csv)
+        try:
+            cached = pd.read_csv(out_csv)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f'[score_target] {pdb_id}: unreadable {out_csv} ({exc!r}), rescoring...',
+                flush=True,
+            )
+        else:
+            try:
+                manifest = _load_decoy_list_df(pdb_id, decoy_set)
+            except FileNotFoundError:
+                manifest = None
+            n_exp = len(manifest) if manifest is not None else None
+            if (
+                manifest is not None
+                and 'loss' in cached.columns
+                and len(cached) == n_exp
+                and cached['loss'].notna().all()
+            ):
+                return cached
+            if (
+                manifest is not None
+                and 'loss' in cached.columns
+                and len(cached) == n_exp
+                and cached['loss'].isna().any()
+            ):
+                n_bad = int(cached['loss'].isna().sum())
+                print(
+                    f'[score_target] {pdb_id}: reusing {out_csv} ({n_bad}/{len(cached)} '
+                    f'NaN losses — often non-finite energy for some decoys; rescoring rarely '
+                    f'fixes this. Use --no_skip_if_exists to force recomputation.',
+                    flush=True,
+                )
+                return cached
+            if (
+                manifest is not None
+                and len(cached) < n_exp
+            ):
+                print(
+                    f'[score_target] {pdb_id}: {out_csv} has {len(cached)}/{n_exp} rows, '
+                    f'rescoring...',
+                    flush=True,
+                )
+            elif manifest is None or 'loss' not in cached.columns:
+                print(
+                    f'[score_target] {pdb_id}: bad cache shape/columns in {out_csv}, rescoring...',
+                    flush=True,
+                )
 
     try:
         df = _load_decoy_list_df(pdb_id, decoy_set)

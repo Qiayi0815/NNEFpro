@@ -437,10 +437,11 @@ class Protein(ProteinBase):
         blocks match ``local_extractor_v2`` / ``hhsuite_CB_v2.h5`` training
         (intra-residue N–CA–C frame, Cβ coordinates, ``_re_order_block``,
         ``start_id`` from ``seg``). Otherwise falls back to the historical
-        neighbor-bead rotation (or if the chain is shorter than 15 residues).
+        neighbor-bead rotation (or if the chain is shorter than one
+        block = ``5 + k`` residues).
         """
         if (ProteinBase.use_local_frame_v2 and self._has_v2_backbone()
-                and self.coords.size(0) >= 15):
+                and self.coords.size(0) >= (5 + self.k)):
             return self._get_local_struct_v2()
         return self._get_local_struct_legacy()
 

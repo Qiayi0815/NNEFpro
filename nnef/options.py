@@ -23,7 +23,13 @@ def get_common_parser():
 
     parser.add_argument("--mode", type=str, default='CB', help='CA / CB / CAS')
 
-    parser.add_argument("--seq_len", type=int, default=14)
+    parser.add_argument("--seq_len", type=int, default=None,
+                        help="Block width minus 1 (block_size = seq_len + 1 = 5 + k). "
+                             "When omitted, DatasetLocalGenCM auto-detects it from "
+                             "the structure h5 (coords.shape[1]), so switching k only "
+                             "requires rebuilding the h5 with "
+                             "local_extractor_v2 build-h5 --k <K>. When set, must match "
+                             "the h5 block width exactly (else the dataset errors out).")
     parser.add_argument("--seq_type", type=str, default='profile')
     parser.add_argument("--residue_type_num", type=int, default=20,
                         help='number of residue types used in the sequence vocabulary')

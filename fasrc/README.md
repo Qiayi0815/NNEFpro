@@ -18,6 +18,7 @@ precompute. You package raw bead/chimeric CSVs into `.h5` on your laptop
 | `train.slurm`              | **v2_cart_offset**: `--use_cart_coords --use_seq_offset` (no ESM).          |
 | `train_v2_dihedral.slurm`  | **v2 + dihedral**: same as `train.slurm` + `--use_dihedral` (no ESM).       |
 | `train_v1_pure.slurm`      | **v1_pure** baseline: no `--use_` flags, bit-identical to 2022 NNEF.        |
+| `train_v1_esm.slurm`       | **v1 + ESM only**: same as v1_pure + `--use_esm` (no cart/offset/dihedral); needs `hhsuite_esm_v2.h5`. |
 | `train_yang_style.slurm`   | Retrain **Yang-style** (`--mixture_seq 1 --legacy_local_frame`, no cart/ESM) on v2 HDF5 → `runs/yang_retrain_<JOBID>/`. |
 | `train_v3_full.slurm`      | **v3_full** full stack: cart + offset + ESM-C 600M + phi/psi dihedral.      |
 | `precompute_esm.slurm`     | One-off: ESM-C 600M per-residue cache -> `hhsuite_esm_v2.h5`.               |
