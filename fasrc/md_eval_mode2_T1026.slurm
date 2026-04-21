@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=nnef-md-mode2-T1026
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=24G
+#SBATCH --time=06:00:00
+#SBATCH --output=runs/slurm-md-mode2-T1026-%A_%a.out
+#SBATCH --error=runs/slurm-md-mode2-T1026-%A_%a.out
+#SBATCH --array=0-8
+#
+# Mode 2 (native-basin stability MD) restricted to CASP14 target T1026:
+#   models = (yang_retrain, v1_rama, v1_rama_esm)
+#   seeds  = (0, 1, 2)
+#   => 3 * 3 = 9 array tasks (indices 0..8).
+#
+# The previous md_eval_mode2_casp14.slurm array failed on T1024/T1025/T1026
+# because those targets' list.csv + decoy bead CSVs weren't synced to the
+# cluster. Before submitting this script, sync T1026 data:
+#
+#   rsync -av nnef/data/decoys/casp14/T1026/  \
+#     qzha@cluster:/n/home03/qzha/nnef/nnef/data/decoys/casp14/T1026/
+#
+# Submit:
+#   sbatch fasrc/md_eval_mode2_T1026.slurm
+# Override step budget:
+#   sbatch --export=ALL,L=50000 fasrc/md_eval_mode2_T1026.slurm
+
+set -euo pipefail
+
+ENV_PREFIX="${ENV_PREFIX:-$HOME/envs/nnef}"
+DATA_DIR="${DATA_DIR:-$HOME/nnef_data}"
+
+module purge
+module load python/3.10.12-fasrc01
+
+PYTHON_BIN="$(command -v python)"
+CONDA_HOOK="$(dirname "$(dirname "$PYTHON_BIN")")/etc/profile.d/conda.sh"
+[ -f "$CONDA_HOOK" ] || { echo "[md_mode2_T1026] conda.sh not found at $CONDA_HOOK"; exit 1; }
+# shellcheck disable=SC1090
+source "$CONDA_HOOK"
+set +u
+conda activate "$ENV_PREFIX"
+set -u
+
+export PYTHONUNBUFFERED=1
+export PYTHONNOUSERSITE=1
+
+PY="${ENV_PREFIX}/bin/python"
+[ -x "$PY" ] || { echo "[md_mode2_T1026] ERROR: no $PY"; exit 1; }
+"$PY" -s -c "import torch; print('[md_mode2_T1026] cuda', torch.cuda.is_available())" || exit 1
+
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4}
+export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4}
+export TOKENIZERS_PARALLELISM=false
+
+cd "$SLURM_SUBMIT_DIR"
+mkdir -p runs eval/md_eval
+
+# Fail fast if the T1026 data didn't get synced to this cluster.
+_T1026_LIST="nnef/data/decoys/casp14/T1026/list.csv"
+if [[ ! -f "$_T1026_LIST" ]]; then
+  echo "[md_mode2_T1026] ERROR: $_T1026_LIST not found. Run the rsync command"
+  echo "                      in the header before submitting this script."
+  exit 1
+fi
+
+MODELS=(yang_retrain v1_rama v1_rama_esm)
+SEEDS=(0 1 2)
+
+N_SEEDS=${#SEEDS[@]}
+
+idx=${SLURM_ARRAY_TASK_ID:-0}
+model_i=$(( idx / N_SEEDS ))
+seed_i=$(( idx % N_SEEDS ))
+
+export REPO="$SLURM_SUBMIT_DIR"
+export DATA_DIR="$DATA_DIR"
+export DEVICE=cuda
+export MD_MODE=native
+export MODEL_KEY="${MODELS[$model_i]}"
+export TARGET=T1026
+export SEED="${SEEDS[$seed_i]}"
+export L="${L:-100000}"
+export TRJ_LOG="${TRJ_LOG:-100}"
+export OUT_ROOT="${OUT_ROOT:-eval/md_eval/mode2}"
+
+echo "----- md_eval mode2 T1026 array task -----"
+hostname
+nvidia-smi
+echo "ARRAY_ID=$SLURM_ARRAY_JOB_ID TASK_ID=$SLURM_ARRAY_TASK_ID"
+echo "MODEL=$MODEL_KEY TARGET=$TARGET SEED=$SEED L=$L"
+echo "------------------------------------------"
+
+bash fasrc/md_eval_one.sh
+
+echo "[md_mode2_T1026] task $SLURM_ARRAY_TASK_ID OK"

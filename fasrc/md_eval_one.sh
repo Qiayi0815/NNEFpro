@@ -52,8 +52,28 @@ DEVICE="${DEVICE:-cuda}"
 DECOY_SET="${DECOY_SET:-casp14}"
 L="${L:-100000}"
 TRJ_LOG="${TRJ_LOG:-100}"
-X_TYPE="${X_TYPE:-mix_fast}"
 OUT_ROOT="${OUT_ROOT:-eval/md_eval}"
+
+# Mode-aware sampler defaults. DynamicsMixFast has a cart_scale=50
+# amplifier that explodes on any but the most conservative step sizes:
+#   * Mode 2 (native): used mix_fast originally -> chain diffused out
+#     of the basin within a few thousand steps.
+#   * Mode 3 (decoy): used mix_fast originally -> chain Rg blew up to
+#     ~1800 A via accumulated dihedral whip (smoke job 7079609).
+# So native and decoy both switch to the plain ``cart`` sampler. Fold
+# keeps mix_fast to retain the 50x exploration factor needed to leave
+# the extended-chain basin; its NaN problem is handled by lowering lr
+# in md_eval.py's defaults_by_mode['fold'].
+if [[ "$MD_MODE" == "native" ]]; then
+  X_TYPE="${X_TYPE:-cart}"
+  LR="${LR:-3e-3}"
+  T_NOISE="${T_NOISE:-3e-3}"
+elif [[ "$MD_MODE" == "decoy" ]]; then
+  X_TYPE="${X_TYPE:-cart}"
+  # lr / t_noise inherit md_eval.py's defaults_by_mode['decoy'] (1e-2)
+else
+  X_TYPE="${X_TYPE:-mix_fast}"
+fi
 
 cd "$REPO"
 

@@ -85,7 +85,6 @@ export TARGET="$TARGET"
 export SEED="${SEEDS[$seed_i]}"
 export L="${L:-100000}"
 export TRJ_LOG="${TRJ_LOG:-100}"
-export X_TYPE="${X_TYPE:-mix_fast}"
 export OUT_ROOT="${OUT_ROOT:-eval/md_eval/mode3}"
 export INIT_BEAD="$INIT_BEAD"
 

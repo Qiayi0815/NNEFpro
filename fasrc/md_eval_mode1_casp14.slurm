@@ -72,7 +72,6 @@ export TARGET="${TARGETS[$target_i]}"
 export SEED="${SEEDS[$seed_i]}"
 export L="${L:-200000}"
 export TRJ_LOG="${TRJ_LOG:-200}"
-export X_TYPE="${X_TYPE:-mix_fast}"
 export OUT_ROOT="${OUT_ROOT:-eval/md_eval/mode1}"
 
 echo "----- md_eval mode1 (folding) array task -----"

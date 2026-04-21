@@ -74,7 +74,6 @@ export TARGET="${TARGETS[$target_i]}"
 export SEED="${SEEDS[$seed_i]}"
 export L="${L:-100000}"
 export TRJ_LOG="${TRJ_LOG:-100}"
-export X_TYPE="${X_TYPE:-mix_fast}"
 export OUT_ROOT="${OUT_ROOT:-eval/md_eval/mode2}"
 
 echo "----- md_eval mode2 array task -----"

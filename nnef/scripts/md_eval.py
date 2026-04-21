@@ -229,9 +229,20 @@ def main() -> None:
     os.makedirs(args.save_dir, exist_ok=True)
 
     # Mode-specific defaults if the user did not override on the CLI.
+    # Fold mode pairs with the mix_fast sampler, whose cart_scale=50
+    # amplifies every Cartesian update by 50x. lr=3e-2 (original fold
+    # default) gave an effective 1.5 A noise stddev per step and NaN'd
+    # on extended-chain starts (see smoke job 7079606). Dropping to 3e-3
+    # keeps the 50x exploration factor over native mode while leaving
+    # per-step displacement in a numerically safe range (~0.15 A).
+    # Decoy mode is paired with the plain ``cart`` sampler by
+    # md_eval_one.sh (no cart_scale amplifier). Without the amplifier,
+    # lr=1e-2 is a safe exploratory step for relaxing a decoy towards
+    # the native basin while avoiding the dihedral-whip explosion that
+    # blew up the mix_fast decoy smoke (job 7079609: traj Rg -> 1800 A).
     defaults_by_mode = {
         'native': dict(lr=1e-2, T_max=1e-2),
-        'fold':   dict(lr=3e-2, T_max=3e-2),
+        'fold':   dict(lr=3e-3, T_max=3e-3),
         'decoy':  dict(lr=1e-2, T_max=1e-2),
     }
     d = defaults_by_mode[args.md_mode]

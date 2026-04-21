@@ -61,7 +61,6 @@ export MD_MODE="${MD_MODE:-native}"
 export SEED="${SEED:-0}"
 export L="${L:-10000}"
 export TRJ_LOG="${TRJ_LOG:-50}"
-export X_TYPE="${X_TYPE:-mix_fast}"
 export OUT_ROOT="${OUT_ROOT:-eval/md_eval_smoke}"
 
 echo "----- md_eval smoke test -----"
