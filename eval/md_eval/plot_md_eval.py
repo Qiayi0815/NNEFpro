@@ -2,18 +2,19 @@
 
 Expects the layout produced by ``fasrc/md_eval_one.sh``:
 
-    eval/md_eval/<mode>/<run_base>/<target>_seed<N>/
+    eval/md_eval/<sweep>/<md_mode>/<run_base>/<target>_seed<N>/
         meta.json
         <target>_energy_rmsd.csv
         <target>_rmsf.csv
-        <target>_trajectory_<mode>.pdb
+        <target>_trajectory_<md_mode>.pdb
 
 Outputs (written alongside input root):
-    summary.csv          -- one row per (mode, model, target, seed)
-    plots/<mode>/<target>_energy.png      -- energy vs step, all models
-    plots/<mode>/<target>_rmsd.png        -- rmsd_to_native vs step
-    plots/<mode>/<target>_rmsf.png        -- per-residue RMSF
-    plots/<mode>/summary_heatmap.png      -- mean final-RMSD per (model, target)
+    summary.csv          -- one row per (sweep, md_mode, model, target, seed)
+    plots/<sweep>/<md_mode>/<target>_energy.png
+    plots/<sweep>/<md_mode>/<target>_rmsd.png
+    plots/<sweep>/<md_mode>/<target>_rg.png
+    plots/<sweep>/<md_mode>/<target>_rmsf.png
+    plots/<sweep>/<md_mode>/summary_heatmap.png
 
 Usage:
     python eval/md_eval/plot_md_eval.py --root eval/md_eval
@@ -55,29 +56,39 @@ def _load_run(run_dir: str) -> dict | None:
 
 
 def _walk_runs(root: str, mode_filter: str | None):
+    """Find every run_dir (one meta.json each) under root.
+
+    Layout: ``root/<sweep>/<md_mode>/<run_base>/<target_seed>/meta.json``
+    where sweep is e.g. ``mode2``/``mode2_lr_ablation`` and md_mode is
+    ``native``/``fold``/``decoy``. ``md_mode`` is read from meta.json so
+    the walker stays robust to layout tweaks.
+    """
     runs = []
-    mode_dirs = sorted(d for d in glob(os.path.join(root, '*')) if os.path.isdir(d))
-    for mode_dir in mode_dirs:
-        mode = os.path.basename(mode_dir)
-        if mode_filter and mode != mode_filter:
+    meta_paths = sorted(glob(os.path.join(root, '**', 'meta.json'), recursive=True))
+    for meta_path in meta_paths:
+        run_dir = os.path.dirname(meta_path)
+        rel_parts = os.path.relpath(run_dir, root).split(os.sep)
+        if len(rel_parts) < 2:
             continue
-        for model_dir in sorted(glob(os.path.join(mode_dir, '*'))):
-            if not os.path.isdir(model_dir):
-                continue
-            run_base = os.path.basename(model_dir)
-            for run_dir in sorted(glob(os.path.join(model_dir, '*_seed*'))):
-                loaded = _load_run(run_dir)
-                if loaded is None:
-                    continue
-                loaded['mode'] = mode
-                loaded['run_base'] = run_base
-                runs.append(loaded)
+        sweep = rel_parts[0]
+        if mode_filter and sweep != mode_filter:
+            continue
+        run_base = rel_parts[-2]
+        loaded = _load_run(run_dir)
+        if loaded is None:
+            continue
+        loaded['mode'] = sweep
+        loaded['md_mode'] = loaded['meta'].get('md_mode', 'unknown')
+        loaded['run_base'] = run_base
+        runs.append(loaded)
     return runs
 
 
 def _run_base_to_model_key(run_base: str) -> str:
     if run_base.startswith('yang_retrain'):
         return 'yang_retrain'
+    if run_base.startswith('yang_legacy'):
+        return 'yang_legacy'
     if run_base.startswith('v1_esm_rama_v2'):
         return 'v1_rama_esm'
     if run_base.startswith('v1_pure_rama_v2'):
@@ -109,6 +120,7 @@ def main() -> None:
         m = r['meta']
         rows.append({
             'mode': r['mode'],
+            'md_mode': r['md_mode'],
             'model_key': _run_base_to_model_key(r['run_base']),
             'run_base': r['run_base'],
             'target': m['target'],
@@ -130,21 +142,25 @@ def main() -> None:
     summary.to_csv(summary_path, index=False)
     print(f'[plot_md_eval] wrote {summary_path} ({len(summary)} runs)')
 
-    # --- Per-(mode, target) traces ------------------------------------------
+    # --- Per-(mode, md_mode, target) traces ---------------------------------
     plots_root = os.path.join(out_dir, 'plots')
     os.makedirs(plots_root, exist_ok=True)
 
-    mode_target_groups: dict[tuple[str, str], list[dict]] = {}
+    groups: dict[tuple[str, str, str], list[dict]] = {}
     for r in runs:
-        key = (r['mode'], r['meta']['target'])
-        mode_target_groups.setdefault(key, []).append(r)
+        key = (r['mode'], r['md_mode'], r['meta']['target'])
+        groups.setdefault(key, []).append(r)
 
-    for (mode, target), grp in mode_target_groups.items():
-        plot_dir = os.path.join(plots_root, mode)
+    for (mode, md_mode, target), grp in groups.items():
+        plot_dir = os.path.join(plots_root, mode, md_mode)
         os.makedirs(plot_dir, exist_ok=True)
+        # Include lr in the label only when a group spans multiple lrs (ablation).
+        lrs_in_group = {float(run['meta']['lr']) for run in grp}
+        show_lr = len(lrs_in_group) > 1
 
         fig_e, ax_e = plt.subplots(figsize=(7, 4))
         fig_r, ax_r = plt.subplots(figsize=(7, 4))
+        fig_g, ax_g = plt.subplots(figsize=(7, 4))
         model_colors: dict[str, str] = {}
         palette = plt.cm.tab10.colors
         for run in grp:
@@ -153,17 +169,28 @@ def main() -> None:
                 model_colors[model_key] = palette[len(model_colors) % len(palette)]
             color = model_colors[model_key]
             traj = run['traj']
-            label = f"{model_key} s{run['meta']['seed']}"
+            seed = run['meta']['seed']
+            if show_lr:
+                label = f"{model_key} lr{run['meta']['lr']:.0e} s{seed}"
+            else:
+                label = f"{model_key} s{seed}"
             ax_e.plot(traj['step'], traj['energy'], color=color, alpha=0.7, label=label)
             ax_r.plot(traj['step'], traj['rmsd_to_native'], color=color, alpha=0.7, label=label)
+            ax_g.plot(traj['step'], traj['rg'], color=color, alpha=0.7, label=label)
+
+        rg_native = grp[0]['meta'].get('rg_native')
+        if rg_native is not None:
+            ax_g.axhline(rg_native, color='k', linestyle='--', alpha=0.5,
+                         label=f'native Rg={rg_native:.2f}')
 
         for ax, ylabel, fig, fname in [
             (ax_e, 'energy', fig_e, f'{target}_energy.png'),
             (ax_r, 'RMSD to native (Å)', fig_r, f'{target}_rmsd.png'),
+            (ax_g, 'Rg (Å)', fig_g, f'{target}_rg.png'),
         ]:
             ax.set_xlabel('MD step')
             ax.set_ylabel(ylabel)
-            ax.set_title(f'{mode} / {target}')
+            ax.set_title(f'{mode} / {md_mode} / {target}')
             ax.legend(fontsize=7, ncol=2, loc='best')
             fig.tight_layout()
             fig.savefig(os.path.join(plot_dir, fname), dpi=150)
@@ -188,15 +215,14 @@ def main() -> None:
                               color=model_colors.get(model_key), alpha=0.2)
         ax_f.set_xlabel('residue')
         ax_f.set_ylabel('RMSF (Å)')
-        ax_f.set_title(f'{mode} / {target} RMSF (mean ± std across seeds)')
+        ax_f.set_title(f'{mode} / {md_mode} / {target} RMSF (mean ± std across seeds)')
         ax_f.legend(fontsize=8)
         fig_f.tight_layout()
         fig_f.savefig(os.path.join(plot_dir, f'{target}_rmsf.png'), dpi=150)
         plt.close(fig_f)
 
-    # --- Cross-model heatmap per mode ---------------------------------------
-    for mode in sorted(summary['mode'].unique()):
-        sub = summary[summary['mode'] == mode]
+    # --- Cross-model heatmap per (mode, md_mode) ----------------------------
+    for (mode, md_mode), sub in summary.groupby(['mode', 'md_mode']):
         pivot = sub.groupby(['model_key', 'target'])['final_rmsd_to_native'].mean().unstack()
         if pivot.empty:
             continue
@@ -206,7 +232,7 @@ def main() -> None:
         ax.set_xticklabels(pivot.columns)
         ax.set_yticks(range(pivot.shape[0]))
         ax.set_yticklabels(pivot.index)
-        ax.set_title(f'{mode}: mean final RMSD to native (Å)')
+        ax.set_title(f'{mode}/{md_mode}: mean final RMSD to native (Å)')
         for i in range(pivot.shape[0]):
             for j in range(pivot.shape[1]):
                 val = pivot.values[i, j]
@@ -216,9 +242,11 @@ def main() -> None:
                             fontsize=8)
         fig.colorbar(im, ax=ax, fraction=0.046)
         fig.tight_layout()
-        fig.savefig(os.path.join(plots_root, mode, 'summary_heatmap.png'), dpi=150)
+        out_path = os.path.join(plots_root, mode, md_mode, 'summary_heatmap.png')
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        fig.savefig(out_path, dpi=150)
         plt.close(fig)
-        print(f'[plot_md_eval] heatmap -> plots/{mode}/summary_heatmap.png')
+        print(f'[plot_md_eval] heatmap -> plots/{mode}/{md_mode}/summary_heatmap.png')
 
     print(f'[plot_md_eval] done -> {out_dir}')
 

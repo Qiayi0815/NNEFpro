@@ -3,7 +3,7 @@
 # Dispatches architecture flags by MODEL_KEY so the slurm wrappers stay simple.
 #
 # Required env:
-#   MODEL_KEY   yang_retrain | v1_rama | v1_rama_esm
+#   MODEL_KEY   yang_retrain | yang_legacy | v1_rama | v1_rama_esm
 #   TARGET      CASP14 target id (e.g. T1053)
 #   MD_MODE     native | fold | decoy
 #   SEED        integer seed
@@ -148,6 +148,23 @@ case "$MODEL_KEY" in
       --legacy_local_frame
     )
     ;;
+  yang_legacy)
+    # Faithful Yang-2022 architecture: --mixture_rama 0 (no rama head).
+    # Trained by fasrc/train_yang_legacy.slurm; loading with --mixture_rama 10
+    # would fail state_dict strict load since this checkpoint has no rama head.
+    LOAD_EXP="${LOAD_EXP:-runs/yang_legacy_7317784}"
+    if [[ ! -f "$LOAD_EXP/models/model.pt" ]]; then
+      echo "[md_eval_one] ERROR: missing $LOAD_EXP/models/model.pt"
+      exit 1
+    fi
+    RUN_BASE="$(basename "$LOAD_EXP")"
+    MODEL_ARGS=(
+      --load_exp "$LOAD_EXP"
+      --mixture_seq 1
+      --mixture_rama 0
+      --legacy_local_frame
+    )
+    ;;
   v1_rama)
     LOAD_EXP="${LOAD_EXP:-runs/v1_pure_rama_v2_6228201}"
     if [[ ! -f "$LOAD_EXP/models/model.pt" ]]; then
@@ -181,7 +198,7 @@ case "$MODEL_KEY" in
     )
     ;;
   *)
-    echo "[md_eval_one] ERROR: MODEL_KEY must be yang_retrain|v1_rama|v1_rama_esm, got: $MODEL_KEY"
+    echo "[md_eval_one] ERROR: MODEL_KEY must be yang_retrain|yang_legacy|v1_rama|v1_rama_esm, got: $MODEL_KEY"
     exit 1
     ;;
 esac
