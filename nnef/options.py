@@ -114,6 +114,15 @@ def get_common_parser():
                         help="h5 dataset name inside each PDB group holding the (L_chain, d_esm) matrix.")
     parser.add_argument("--esm_fuse", type=str, default='concat', choices=['concat', 'film'],
                         help="How to fuse the projected ESM vector into the structure token.")
+    parser.add_argument("--esm_pool", type=str, default='per_residue',
+                        choices=['per_residue', 'center_only', 'attn_pool'],
+                        help="How to aggregate ESM across the 15 block positions before adding to "
+                             "x_feature. 'per_residue' (default, back-compat): keep one ESM vector per "
+                             "position. 'center_only': replace all 15 positions with the center "
+                             "residue's ESM vector. 'attn_pool': learnable softmax-weighted sum over "
+                             "the 15 positions, broadcast back. center_only and attn_pool address the "
+                             "problem that the 10 topological neighbors in each block come from "
+                             "arbitrary sequence contexts.")
 
     # -----------------------------------------------------------------------
     # Additional internal coordinate / block-representation enhancements.

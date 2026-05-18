@@ -183,8 +183,13 @@ case "$MODEL_KEY" in
       echo "[md_eval_one] ERROR: missing $LOAD_EXP/models/model.pt"
       exit 1
     fi
-    if [[ ! -f "$ESM_H5" ]]; then
-      echo "[md_eval_one] ERROR: v1_rama_esm needs ESM cache: $ESM_H5"
+    # ESM cache: default is the ESM-C 600M cache ($ESM_H5, set at the top of
+    # this script). Ablation runs override via $ESM_H5_OVERRIDE to point at the
+    # multi-layer ESM2 h5; ESM_DIM_IN / ESM_DIM_OUT / ESM_DATASET_NAME / ESM_POOL
+    # default to the back-compat single-cell values.
+    ESM_H5_EFFECTIVE="${ESM_H5_OVERRIDE:-$ESM_H5}"
+    if [[ ! -f "$ESM_H5_EFFECTIVE" ]]; then
+      echo "[md_eval_one] ERROR: v1_rama_esm needs ESM cache: $ESM_H5_EFFECTIVE"
       exit 1
     fi
     RUN_BASE="$(basename "$LOAD_EXP")"
@@ -192,9 +197,11 @@ case "$MODEL_KEY" in
       --load_exp "$LOAD_EXP"
       --mixture_rama 10
       --use_esm
-      --esm_h5_path "$ESM_H5"
-      --esm_dim_in 1152
-      --esm_dim_out 32
+      --esm_h5_path "$ESM_H5_EFFECTIVE"
+      --esm_dim_in "${ESM_DIM_IN:-1152}"
+      --esm_dim_out "${ESM_DIM_OUT:-32}"
+      --esm_dataset_name "${ESM_DATASET_NAME:-esm}"
+      --esm_pool "${ESM_POOL:-per_residue}"
     )
     ;;
   *)

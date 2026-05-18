@@ -67,6 +67,7 @@ class LocalTransformer(nn.Module):
         if self.use_esm:
             self.esm_dim_in = int(getattr(args, 'esm_dim_in', 1280))
             self.esm_dim_out = int(getattr(args, 'esm_dim_out', 32))
+            self.esm_pool = str(getattr(args, 'esm_pool', 'per_residue'))
             hidden_e = max(4 * self.esm_dim_out, self.esm_dim_out)
             self.esm_proj = nn.Sequential(
                 nn.Linear(self.esm_dim_in, hidden_e),
@@ -81,6 +82,12 @@ class LocalTransformer(nn.Module):
             nn.init.zeros_(self.esm_proj[-1].bias)
             nn.init.zeros_(self.linear_x_esm.weight)
             nn.init.zeros_(self.linear_x_esm.bias)
+            if self.esm_pool == 'attn_pool':
+                # Per-position scalar score; softmax over the 15-position block.
+                # Zero-init so this starts identical to mean-pool (uniform).
+                self.esm_pool_score = nn.Linear(self.esm_dim_in, 1)
+                nn.init.zeros_(self.esm_pool_score.weight)
+                nn.init.zeros_(self.esm_pool_score.bias)
 
         if self.use_cart_coords:
             # Raw block-local (x, y, z) complementing spherical (r, θ, φ).
@@ -181,7 +188,19 @@ class LocalTransformer(nn.Module):
         # are off, this block is a no-op so the baseline path is bit-identical.
         # Every side layer is zero-initialized -> no contribution at step 0.
         if self.use_esm and esm is not None:
-            e_proj = self.esm_proj(esm)                   # (N, L, esm_dim_out)
+            # esm: (N, L, esm_dim_in). Pool / select across the L=15 positions
+            # before projecting. See nnef/options.py --esm_pool.
+            if self.esm_pool == 'center_only':
+                # Replace all positions with center residue's ESM vector.
+                esm_use = esm[:, 0:1, :].expand_as(esm)
+            elif self.esm_pool == 'attn_pool':
+                score = self.esm_pool_score(esm)                  # (N, L, 1)
+                attn = torch.softmax(score, dim=1)
+                pooled = (attn * esm).sum(dim=1, keepdim=True)    # (N, 1, D)
+                esm_use = pooled.expand_as(esm)
+            else:  # 'per_residue' -- back-compat default
+                esm_use = esm
+            e_proj = self.esm_proj(esm_use)                       # (N, L, esm_dim_out)
             x_feature = x_feature + self.linear_x_esm(e_proj)
         if self.use_cart_coords and coords_cart is not None:
             x_feature = x_feature + self.linear_x_cart(coords_cart)

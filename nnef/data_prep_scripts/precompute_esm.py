@@ -51,7 +51,7 @@ import argparse
 import os
 import sys
 import time
-from typing import Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import h5py
 import numpy as np
@@ -116,14 +116,33 @@ class ESMEmbedder:
     family-agnostic. ``embed(seq)`` returns ``(L, d_esm)`` float16 numpy.
     """
 
-    def __init__(self, model_name: str, device: str, dtype: torch.dtype):
+    def __init__(self, model_name: str, device: str, dtype: torch.dtype,
+                 repr_layers: Optional[List[int]] = None):
+        """``repr_layers`` lets the caller extract multiple ESM2 layers in one
+        forward pass (e.g. ``[32, 33]`` for penultimate + final). Ignored for
+        ESM-C since its open API doesn't expose intermediate layers. ``None``
+        means single final layer (back-compat behaviour: dataset name 'esm')."""
         self.model_name = model_name
         self.device = torch.device(device)
         self.dtype = dtype
+        self.requested_layers = list(repr_layers) if repr_layers else None
         self.family, self.client, self.d_esm = self._build(model_name)
+        # Resolve which layers we actually emit + their h5 dataset names.
+        # Back-compat default: single final layer -> dataset 'esm'.
+        if self.family == 'esm2' and self.requested_layers is not None:
+            self._emit_layers = list(self.requested_layers)
+            self._emit_names = [f'esm_l{L}' for L in self._emit_layers]
+        else:
+            # ESM-C never gets intermediate layers; emit single final under 'esm'.
+            if self.family == 'esmc' and self.requested_layers is not None:
+                print(f'[precompute_esm] WARN: --repr_layers ignored for ESM-C '
+                      f'(API exposes only final layer)')
+            self._emit_layers = [self._fair_repr_layer] if self.family == 'esm2' else [None]
+            self._emit_names = ['esm']
         print(f'[precompute_esm] loaded {model_name} '
               f'(family={self.family}, d_esm={self.d_esm}, device={self.device}, '
-              f'dtype={self.dtype})')
+              f'dtype={self.dtype}, layers={self._emit_layers}, '
+              f'names={self._emit_names})')
 
     def _build(self, model_name: str):
         if model_name.startswith('esmc_'):
@@ -163,8 +182,12 @@ class ESMEmbedder:
         raise ValueError(f'unknown model family: {model_name}')
 
     @torch.no_grad()
-    def embed(self, seq: str) -> np.ndarray:
-        """Return per-residue embedding ``(L, d_esm)`` float16, BOS/EOS stripped."""
+    def embed(self, seq: str) -> Dict[str, np.ndarray]:
+        """Return ``{dataset_name: (L, d_esm) float16}``. Single-layer config
+        returns one entry under 'esm'; multi-layer returns 'esm_lXX' per layer.
+        BOS/EOS are stripped."""
+        out_dict: Dict[str, np.ndarray] = {}
+
         if self.family == 'esmc':
             from esm.sdk.api import ESMProtein, LogitsConfig
             protein = ESMProtein(sequence=seq)
@@ -188,24 +211,33 @@ class ESMEmbedder:
                 )
             # Typical shape: (1, L+2, d_esm) with BOS/EOS.
             emb = out.embeddings[0, 1:-1]
-        else:  # esm2
-            data = [('query', seq)]
-            _, _, batch_tokens = self._fair_batch_converter(data)
-            batch_tokens = batch_tokens.to(self.device)
-            out = self.client(
-                batch_tokens,
-                repr_layers=[self._fair_repr_layer],
-                return_contacts=False,
-            )
-            # fair-esm prepends <cls> and appends <eos>
-            emb = out['representations'][self._fair_repr_layer][0, 1:-1]
+            if emb.shape[0] != len(seq):
+                raise RuntimeError(
+                    f'embedding length {emb.shape[0]} != seq length {len(seq)} '
+                    f'for {self.model_name}'
+                )
+            out_dict[self._emit_names[0]] = emb.to(torch.float16).cpu().numpy()
+            return out_dict
 
-        if emb.shape[0] != len(seq):
-            raise RuntimeError(
-                f'embedding length {emb.shape[0]} != seq length {len(seq)} '
-                f'for {self.model_name}'
-            )
-        return emb.to(torch.float16).cpu().numpy()
+        # ESM2: one forward pass extracts every requested layer.
+        data = [('query', seq)]
+        _, _, batch_tokens = self._fair_batch_converter(data)
+        batch_tokens = batch_tokens.to(self.device)
+        out = self.client(
+            batch_tokens,
+            repr_layers=self._emit_layers,
+            return_contacts=False,
+        )
+        for L, name in zip(self._emit_layers, self._emit_names):
+            # fair-esm prepends <cls> and appends <eos>
+            emb = out['representations'][L][0, 1:-1]
+            if emb.shape[0] != len(seq):
+                raise RuntimeError(
+                    f'embedding length {emb.shape[0]} != seq length {len(seq)} '
+                    f'for {self.model_name} layer {L}'
+                )
+            out_dict[name] = emb.to(torch.float16).cpu().numpy()
+        return out_dict
 
 
 # --------------------------------------------------------------------------- #
@@ -239,8 +271,12 @@ def _iter_chains(seq_h5_path: str,
                 return
 
 
-def _write_chain(out_h5: h5py.File, key: str, seq: str, emb: np.ndarray,
+def _write_chain(out_h5: h5py.File, key: str, seq: str,
+                 emb: Dict[str, np.ndarray],
                  model_name: str) -> None:
+    """``emb`` is a dict ``{dataset_name: (L, d_esm) float16}`` -- single entry
+    'esm' for the legacy/back-compat path, or multiple 'esm_lXX' entries when
+    multiple ESM2 layers were extracted."""
     if key in out_h5:
         del out_h5[key]
     grp = out_h5.create_group(key)
@@ -248,18 +284,22 @@ def _write_chain(out_h5: h5py.File, key: str, seq: str, emb: np.ndarray,
         'seq',
         data=np.frombuffer(seq.encode('ascii'), dtype='S1'),
     )
-    grp.create_dataset(
-        'esm',
-        data=emb,
-        dtype='float16',
-        compression='gzip',
-        compression_opts=4,
-        shuffle=True,
-        # Chunk = one residue-row; keeps per-block gather fast on training.
-        chunks=(min(emb.shape[0], 64), emb.shape[1]),
-    )
+    d_esm_first: Optional[int] = None
+    for ds_name, arr in emb.items():
+        grp.create_dataset(
+            ds_name,
+            data=arr,
+            dtype='float16',
+            compression='gzip',
+            compression_opts=4,
+            shuffle=True,
+            chunks=(min(arr.shape[0], 64), arr.shape[1]),
+        )
+        if d_esm_first is None:
+            d_esm_first = int(arr.shape[1])
     grp.attrs['model'] = model_name
-    grp.attrs['d_esm'] = int(emb.shape[1])
+    grp.attrs['d_esm'] = d_esm_first
+    grp.attrs['datasets'] = ','.join(sorted(emb.keys()))
     grp.attrs['seq_source'] = 'hhsuite_pdb_seq_v2:row0'
 
 
@@ -292,6 +332,12 @@ def main() -> None:
                         'higher = slightly faster.')
     p.add_argument('--overwrite', action='store_true', default=False,
                    help='Recompute keys even if they already exist in --out_h5.')
+    p.add_argument('--repr_layers', type=int, nargs='+', default=None,
+                   help='Extract these ESM2 transformer layers (single forward '
+                        'pass). e.g. `--repr_layers 32 33` writes datasets '
+                        '`esm_l32` + `esm_l33` per chain. None (default) keeps '
+                        'back-compat single-layer behavior (final layer, dataset '
+                        '`esm`). Ignored for ESM-C (no intermediate-layer API).')
     args = p.parse_args()
 
     dtype = torch.float16 if args.dtype == 'float16' else torch.float32
@@ -312,7 +358,8 @@ def main() -> None:
         print(f'[precompute_esm] {len(existing)} chains already present in '
               f'{args.out_h5}; resuming.')
 
-    embedder = ESMEmbedder(args.model, args.device, dtype)
+    embedder = ESMEmbedder(args.model, args.device, dtype,
+                           repr_layers=args.repr_layers)
 
     skip_stats = {'too_long': 0, 'already': 0, 'decode_error': 0,
                   'forward_error': 0, 'done': 0}
