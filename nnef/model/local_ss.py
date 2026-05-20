@@ -75,11 +75,19 @@ class LocalTransformer(nn.Module):
                 nn.Linear(hidden_e, self.esm_dim_out),
             )
             self.linear_x_esm = nn.Linear(self.esm_dim_out, args.dim)
-            # Zero-init both the final projection and the additive side layer
-            # so the ESM branch contributes nothing at step 0 regardless of
-            # the ESM tensor magnitude.
-            nn.init.zeros_(self.esm_proj[-1].weight)
-            nn.init.zeros_(self.esm_proj[-1].bias)
+            # LoRA-style warm start: zero-init ONLY the OUTER additive side
+            # (linear_x_esm). The INNER projection (esm_proj[-1]) keeps its
+            # default random init.
+            #
+            # Why not both: zero-init'ing BOTH locks the gradient on both
+            # layers at 0 forever (because the chain-rule contribution through
+            # whichever zero-weight layer kills the gradient on the other), so
+            # the ESM branch never learns. With only the outer projection
+            # zero-init'd: forward is still 0 at step 0 (so the baseline path
+            # is bit-identical at init), but gradient on linear_x_esm.weight =
+            # grad_next * e_proj is NONZERO (because e_proj is non-zero with
+            # random esm_proj[-1] init). After step 0, linear_x_esm.weight is
+            # no longer zero, which un-blocks the gradient on esm_proj[-1] too.
             nn.init.zeros_(self.linear_x_esm.weight)
             nn.init.zeros_(self.linear_x_esm.bias)
             if self.esm_pool == 'attn_pool':
