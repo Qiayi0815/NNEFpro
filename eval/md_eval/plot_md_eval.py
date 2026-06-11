@@ -34,6 +34,163 @@ import numpy as np
 import pandas as pd
 
 
+# --------------------------------------------------------------------------- #
+# Time-INdependent observables (RMSF, native-contacts %, secondary-structure
+# content) — these don't depend on the arbitrary NNEF integrator step size,
+# unlike RMSD-vs-step. See advisor note: NNEF Langevin has no physical time
+# scale, so equilibrium-style averages are the only fair cross-model metric.
+# --------------------------------------------------------------------------- #
+def _read_ca_trajectory(pdb_path: str) -> 'np.ndarray | None':
+    """Parse a multi-MODEL Cα-only PDB into (F, N, 3) float32. Returns None
+    if the file is missing or unreadable."""
+    if not os.path.isfile(pdb_path):
+        return None
+    frames = []
+    current = []
+    with open(pdb_path) as fh:
+        for line in fh:
+            if line.startswith('MODEL'):
+                current = []
+            elif line.startswith('ATOM'):
+                try:
+                    current.append((
+                        float(line[30:38]), float(line[38:46]), float(line[46:54])
+                    ))
+                except ValueError:
+                    return None
+            elif line.startswith('ENDMDL'):
+                if current:
+                    frames.append(current)
+                current = []
+    if current:
+        frames.append(current)
+    if not frames:
+        return None
+    return np.asarray(frames, dtype=np.float32)
+
+
+def _native_coords_from_bead(bead_csv: str, atom: str = 'CB') -> 'np.ndarray | None':
+    """Read the native bead CSV and return (N, 3) coordinates for the requested
+    atom. The MD trajectory PDB is mislabeled 'CA' but actually stores Cβ
+    positions (NNEF runs with --mode CB by default), so atom='CB' is what we
+    want for contact / RMSF references. atom='CA' is used only for static
+    secondary-structure assignment on the native, where real Cα geometry is
+    required (Cα-Cα = 3.8 Å vs Cβ-Cβ = 5-6 Å)."""
+    if not os.path.isfile(bead_csv):
+        return None
+    df = pd.read_csv(bead_csv)
+    cols = {
+        'CA': ('xca', 'yca', 'zca'),
+        'CB': ('xcb', 'ycb', 'zcb'),
+    }[atom]
+    return df[list(cols)].to_numpy(dtype=np.float32)
+
+
+def _native_contacts_fraction(traj: 'np.ndarray', native: 'np.ndarray',
+                               cutoff: float = 8.0,
+                               seq_sep: int = 2) -> 'np.ndarray':
+    """For each frame, fraction of native Cα-Cα contacts (|i-j|>=seq_sep and
+    native distance < cutoff) that are preserved (distance < cutoff in frame).
+    Returns (F,) array."""
+    n = native.shape[0]
+    diff = native[:, None, :] - native[None, :, :]
+    dist_native = np.linalg.norm(diff, axis=-1)
+    # Mask of native contacts (upper triangle only, |i-j| >= seq_sep)
+    i_idx, j_idx = np.triu_indices(n, k=seq_sep)
+    is_native_contact = dist_native[i_idx, j_idx] < cutoff
+    pairs_i = i_idx[is_native_contact]
+    pairs_j = j_idx[is_native_contact]
+    if pairs_i.size == 0:
+        return np.zeros(traj.shape[0], dtype=np.float32)
+    # Per-frame: how many of those pairs are still < cutoff
+    out = np.empty(traj.shape[0], dtype=np.float32)
+    for k, frame in enumerate(traj):
+        d = np.linalg.norm(frame[pairs_i] - frame[pairs_j], axis=-1)
+        out[k] = float((d < cutoff).sum()) / float(pairs_i.size)
+    return out
+
+
+def _ca_only_ss(coords: 'np.ndarray') -> str:
+    """Cα-only secondary-structure assignment (PROSS-style, Srinivasan &
+    Rose 1999). Uses two geometric features at residue i:
+
+      - tau (3-Cα bond angle):  Cα(i-1)-Cα(i)-Cα(i+1)
+      - alpha (4-Cα torsion):   Cα(i-1)-Cα(i)-Cα(i+1)-Cα(i+2)
+
+    Thresholds (relaxed PROSS):
+      Helix:  alpha ∈ [25°, 105°]   AND  tau ∈ [80°, 105°]
+      Strand: |alpha| ≥ 105°         AND  tau ∈ [115°, 175°]
+
+    Returns string of length L with chars 'H', 'E', 'C'. Then smooths so SS
+    runs must be ≥ 3 residues (isolated H/E are demoted to coil)."""
+    L = coords.shape[0]
+    ss = ['C'] * L
+    if L < 5:
+        return ''.join(ss)
+
+    def _bond_angle(a, b, c):
+        v1 = a - b; v2 = c - b
+        cos = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-9)
+        return float(np.degrees(np.arccos(np.clip(cos, -1, 1))))
+
+    def _torsion(p0, p1, p2, p3):
+        b0 = p1 - p0; b1 = p2 - p1; b2 = p3 - p2
+        b1n = b1 / (np.linalg.norm(b1) + 1e-9)
+        v = b0 - np.dot(b0, b1n) * b1n
+        w = b2 - np.dot(b2, b1n) * b1n
+        x = float(np.dot(v, w))
+        y = float(np.dot(np.cross(b1n, v), w))
+        return float(np.degrees(np.arctan2(y, x)))
+
+    for i in range(1, L - 2):
+        tau = _bond_angle(coords[i - 1], coords[i], coords[i + 1])
+        alpha = _torsion(coords[i - 1], coords[i], coords[i + 1], coords[i + 2])
+        a_abs = abs(alpha)
+        if 25 <= alpha <= 105 and 80 <= tau <= 105:
+            ss[i] = 'H'
+        elif a_abs >= 105 and 115 <= tau <= 175:
+            ss[i] = 'E'
+
+    # Smooth: SS runs must be ≥ 3 residues; demote shorter to coil.
+    smoothed = list(ss)
+    runs = []
+    j = 0
+    while j < L:
+        k = j
+        while k < L and smoothed[k] == smoothed[j]:
+            k += 1
+        runs.append((j, k, smoothed[j]))
+        j = k
+    for (a, b, lab) in runs:
+        if lab in ('H', 'E') and (b - a) < 3:
+            for k in range(a, b):
+                smoothed[k] = 'C'
+    return ''.join(smoothed)
+
+
+def _ss_fractions(ss_string: str) -> tuple:
+    L = len(ss_string)
+    if L == 0:
+        return 0.0, 0.0, 0.0
+    h = ss_string.count('H') / L
+    e = ss_string.count('E') / L
+    c = 1.0 - h - e
+    return h, e, c
+
+
+def _ss_match_fraction(traj_ss: list, native_ss: str) -> 'np.ndarray':
+    """For each frame, fraction of residues whose Cα-only SS label matches the
+    native's. traj_ss is list of strings (one per frame). Returns (F,) array."""
+    n = len(native_ss)
+    out = np.empty(len(traj_ss), dtype=np.float32)
+    for k, s in enumerate(traj_ss):
+        if len(s) != n:
+            out[k] = np.nan
+        else:
+            out[k] = sum(1 for a, b in zip(s, native_ss) if a == b) / n
+    return out
+
+
 def _load_run(run_dir: str) -> dict | None:
     meta_path = os.path.join(run_dir, 'meta.json')
     if not os.path.isfile(meta_path):
@@ -52,7 +209,64 @@ def _load_run(run_dir: str) -> dict | None:
     rmsf = None
     if os.path.isfile(rmsf_csv):
         rmsf = pd.read_csv(rmsf_csv)
-    return {'meta': meta, 'traj': traj, 'rmsf': rmsf, 'refs': df.iloc[:3]}
+
+    # --- Time-independent observables ---------------------------------------
+    # NNEF runs --mode CB by default, so the trajectory PDB stores Cβ positions
+    # (labelled "CA" in the PDB ATOM records -- that's md_eval.py's convention).
+    # We use Cβ from the native bead CSV as the contact / RMSF reference, and
+    # real Cα from the native CSV for static secondary-structure context.
+    md_mode = meta.get('md_mode', 'native')
+    pdb_path = os.path.join(run_dir, f'{target}_trajectory_{md_mode}.pdb')
+    traj_coords = _read_ca_trajectory(pdb_path)  # actually Cβ despite label
+
+    # Resolve native bead CSV. Try (in order): meta-recorded path, yang_small
+    # location, CASP14 top-GDT decoy auto-resolve, 3DRobot native.
+    native_bead = None
+    candidates = []
+    if meta.get('native_bead'):
+        candidates.append(meta['native_bead'])
+    candidates.append(f'nnef/data/yang_small/{target}/{target}_bead.csv')
+    # CASP14 top-GDT proxy: pick the highest-GDT_TS decoy from list.csv
+    casp_list = f'nnef/data/decoys/casp14/{target}/list.csv'
+    if os.path.isfile(casp_list):
+        try:
+            ll = pd.read_csv(casp_list).dropna(subset=['GDT_TS'])
+            if len(ll):
+                top = ll.sort_values('GDT_TS', ascending=False).iloc[0]['NAME']
+                candidates.append(
+                    f'nnef/data/decoys/casp14/{target}/{top}_bead.csv')
+        except Exception:
+            pass
+    # 3DRobot native bead
+    candidates.append(f'nnef/data/decoys/3DRobot_set/{target}/native_bead.csv')
+    for c in candidates:
+        if c and os.path.isfile(c):
+            native_bead = c
+            break
+    native_cb = _native_coords_from_bead(native_bead, 'CB') if native_bead else None
+    native_ca = _native_coords_from_bead(native_bead, 'CA') if native_bead else None
+
+    contacts = None
+    native_ss = None
+    if traj_coords is not None and native_cb is not None \
+            and traj_coords.shape[1] == native_cb.shape[0]:
+        contacts = _native_contacts_fraction(traj_coords, native_cb, cutoff=8.0)
+    if native_ca is not None:
+        native_ss = _ca_only_ss(native_ca)
+
+    return {
+        'meta': meta,
+        'traj': traj,
+        'rmsf': rmsf,
+        'refs': df.iloc[:3],
+        # Dynamic, time-independent (mean across post-equilibration frames):
+        'native_contacts': contacts,            # (F,) Cβ-based fraction-preserved
+        # Static, per-protein context (not a model observable):
+        'native_ss': native_ss,
+        'native_h_frac': _ss_fractions(native_ss)[0] if native_ss else None,
+        'native_e_frac': _ss_fractions(native_ss)[1] if native_ss else None,
+        'native_c_frac': _ss_fractions(native_ss)[2] if native_ss else None,
+    }
 
 
 def _walk_runs(root: str, mode_filter: str | None):
@@ -93,7 +307,24 @@ def _run_base_to_model_key(run_base: str) -> str:
         return 'v1_rama_esm'
     if run_base.startswith('v1_pure_rama_v2'):
         return 'v1_rama'
+    # ESM ablation cells: run_base like v1_esm_abl_w32_l32_attn_pool_13861188.
+    # Strip the trailing JOBID to get a stable label across resubmits.
+    if run_base.startswith('v1_esm_abl_'):
+        import re
+        m = re.match(r'v1_esm_abl_(w\d+_l\d+_\w+?)_\d+$', run_base)
+        if m:
+            return m.group(1)
+        return run_base[len('v1_esm_abl_'):]
+    # Yang 2022 released paper checkpoint lives at params/exp1, basename = 'exp1'.
+    if run_base == 'exp1':
+        return 'paper_exp1'
     return run_base
+
+
+# Models considered "ESM ablation cells" for the paired ESM-vs-rama delta plot.
+def _is_esm_ablation_key(model_key: str) -> bool:
+    import re
+    return bool(re.match(r'^w\d+_l\d+_(per_residue|center_only|attn_pool)$', model_key))
 
 
 def main() -> None:
@@ -115,10 +346,23 @@ def main() -> None:
         raise SystemExit(f'No md_eval runs found under {args.root!r}')
 
     # --- Summary CSV ---------------------------------------------------------
+    # Equilibration: drop the first 10% of frames before averaging the
+    # time-INdependent observables. NNEF Langevin step has no physical-time
+    # interpretation, so we always report frame-averaged observables; the
+    # equilibration cut just removes the obvious "still-near-init" portion.
+    EQUIL_FRAC = 0.10
+
+    def _post_eq_mean(arr):
+        if arr is None or len(arr) == 0:
+            return None
+        k = max(1, int(len(arr) * EQUIL_FRAC))
+        post = arr[k:]
+        return float(np.nanmean(post)) if len(post) else None
+
     rows = []
     for r in runs:
         m = r['meta']
-        rows.append({
+        row = {
             'mode': r['mode'],
             'md_mode': r['md_mode'],
             'model_key': _run_base_to_model_key(r['run_base']),
@@ -136,7 +380,19 @@ def main() -> None:
             'final_rmsd_to_start': m['final_rmsd_to_start'],
             'rg_native': m['rg_native'],
             'elapsed_sec': m['elapsed_sec'],
-        })
+            # Mean per-residue RMSF (time-independent, averaged over residues)
+            'rmsf_mean': (float(r['rmsf']['rmsf'].mean()) if r['rmsf'] is not None
+                          else None),
+            # Time-INdependent dynamic observable (post-equilibration mean):
+            # what fraction of native Cβ-Cβ contacts (<8 Å) remain in MD.
+            'native_contacts_mean': _post_eq_mean(r['native_contacts']),
+            # Static native SS reference (computed once from real Cα, for
+            # context only -- we cannot reliably assign SS to MD Cβ frames).
+            'native_h_frac':        r['native_h_frac'],
+            'native_e_frac':        r['native_e_frac'],
+            'native_c_frac':        r['native_c_frac'],
+        }
+        rows.append(row)
     summary = pd.DataFrame(rows)
     summary_path = os.path.join(out_dir, 'summary.csv')
     summary.to_csv(summary_path, index=False)
@@ -247,6 +503,164 @@ def main() -> None:
         fig.savefig(out_path, dpi=150)
         plt.close(fig)
         print(f'[plot_md_eval] heatmap -> plots/{mode}/{md_mode}/summary_heatmap.png')
+
+    # --- Per-(mode, md_mode) model box plot ---------------------------------
+    # One box per model_key showing the spread of final RMSD across all
+    # (protein, seed) tasks. Useful as a one-glance "which model wins" figure.
+    for (mode, md_mode), sub in summary.groupby(['mode', 'md_mode']):
+        models = sorted(sub['model_key'].unique())
+        if len(models) < 2 or len(sub) < 6:
+            continue
+        data = [sub.loc[sub.model_key == m, 'final_rmsd_to_native'].values
+                for m in models]
+        fig, ax = plt.subplots(figsize=(max(4.0, 1.2 * len(models) + 1.5), 4))
+        bp = ax.boxplot(data, labels=models, patch_artist=True, showmeans=True,
+                        widths=0.55,
+                        meanprops={'marker': 'D', 'markerfacecolor': 'k',
+                                   'markeredgecolor': 'k', 'markersize': 5})
+        cmap = plt.cm.tab10.colors
+        for i, patch in enumerate(bp['boxes']):
+            patch.set_facecolor(cmap[i % len(cmap)])
+            patch.set_alpha(0.55)
+        for i, m in enumerate(models):
+            y = sub.loc[sub.model_key == m, 'final_rmsd_to_native'].values
+            x = np.full_like(y, i + 1, dtype=float) + \
+                (np.random.RandomState(i).rand(len(y)) - 0.5) * 0.18
+            ax.scatter(x, y, color=cmap[i % len(cmap)], alpha=0.7, s=16,
+                       edgecolor='k', linewidth=0.3)
+        ax.set_ylabel('final RMSD to native (Å)')
+        ax.set_title(f'{mode}/{md_mode}: per-task final RMSD by model '
+                     f'(n={len(sub) // len(models)} per box)')
+        ax.grid(axis='y', alpha=0.3)
+        plt.setp(ax.get_xticklabels(), rotation=20, ha='right')
+        fig.tight_layout()
+        out_path = os.path.join(plots_root, mode, md_mode, 'box_final_rmsd.png')
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f'[plot_md_eval] box     -> plots/{mode}/{md_mode}/box_final_rmsd.png')
+
+    # --- ESM-vs-rama paired delta bar per (mode, md_mode) -------------------
+    # Only drawn when both 'v1_rama' (no ESM) and an ESM-ablation cell are
+    # present in the same sweep. Negative bar = ESM helps that protein.
+    for (mode, md_mode), sub in summary.groupby(['mode', 'md_mode']):
+        if 'v1_rama' not in set(sub.model_key):
+            continue
+        esm_keys = [m for m in sub.model_key.unique() if _is_esm_ablation_key(m)]
+        if not esm_keys:
+            continue
+        rama_per_target = (sub[sub.model_key == 'v1_rama']
+                           .groupby('target')['final_rmsd_to_native'].mean())
+        for esm_key in esm_keys:
+            esm_per_target = (sub[sub.model_key == esm_key]
+                              .groupby('target')['final_rmsd_to_native'].mean())
+            common = sorted(set(rama_per_target.index) & set(esm_per_target.index))
+            if not common:
+                continue
+            delta = (esm_per_target[common] - rama_per_target[common]).sort_values()
+            colors = ['tab:green' if v < 0 else 'tab:red' for v in delta.values]
+            fig, ax = plt.subplots(figsize=(8, 0.32 * len(delta) + 1.5))
+            ax.barh(range(len(delta)), delta.values, color=colors, alpha=0.75)
+            ax.set_yticks(range(len(delta)))
+            ax.set_yticklabels(delta.index)
+            ax.axvline(0, color='k', lw=0.8)
+            ax.set_xlabel(f'ΔRMSD = RMSD({esm_key}) − RMSD(v1_rama)  (Å)')
+            n_helps = int((delta < 0).sum()); n_hurts = int((delta > 0).sum())
+            ax.set_title(f'{mode}/{md_mode}: ESM contribution per protein   '
+                         f'(green={n_helps} helps, red={n_hurts} hurts, '
+                         f'mean Δ={delta.mean():+.2f} Å)')
+            ax.grid(axis='x', alpha=0.3)
+            fig.tight_layout()
+            out_path = os.path.join(plots_root, mode, md_mode,
+                                    f'bar_esm_delta_{esm_key}.png')
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            fig.savefig(out_path, dpi=150)
+            plt.close(fig)
+            print(f'[plot_md_eval] esm_delta -> plots/{mode}/{md_mode}/bar_esm_delta_{esm_key}.png')
+
+    # --- Time-INdependent observables: grouped bars per protein x model -----
+    # These are the metrics the advisor wants emphasized (vs RMSD-vs-step,
+    # which is misleading since NNEF Langevin has no physical time scale).
+    def _grouped_bar(sub, value_col, ylabel, title, out_path,
+                     native_col=None, ylim=None):
+        """One grouped bar chart: x = target, color = model_key.
+        sub: subset of summary for one (mode, md_mode).
+        value_col: column name to plot (mean across seeds).
+        native_col: optional column of native reference (drawn as horizontal
+            black ticks per protein, ignoring model).
+        """
+        models = sorted(sub.model_key.unique())
+        targets = sorted(sub.target.unique())
+        if not targets or len(models) < 2:
+            return
+        agg = (sub.groupby(['target', 'model_key'])[value_col]
+                  .agg(['mean', 'std']).reset_index())
+        if native_col and native_col in sub.columns:
+            native_per_target = (sub.groupby('target')[native_col]
+                                    .first().to_dict())
+        else:
+            native_per_target = {}
+
+        n_t = len(targets); n_m = len(models)
+        bar_w = 0.8 / n_m
+        fig, ax = plt.subplots(figsize=(max(7, 0.55 * n_t + 2.5), 4))
+        palette = plt.cm.tab10.colors
+        for mi, m in enumerate(models):
+            xs = []; ys = []; es = []
+            for ti, t in enumerate(targets):
+                row = agg[(agg.target == t) & (agg.model_key == m)]
+                if row.empty:
+                    continue
+                xs.append(ti + (mi - (n_m - 1) / 2) * bar_w)
+                ys.append(float(row['mean'].iloc[0]))
+                es.append(float(row['std'].iloc[0]) if pd.notna(row['std'].iloc[0]) else 0.0)
+            ax.bar(xs, ys, width=bar_w * 0.95, yerr=es, capsize=2,
+                   color=palette[mi % len(palette)], alpha=0.75,
+                   edgecolor='black', linewidth=0.4, label=m)
+        # Draw native reference (per-protein horizontal tick) if provided
+        for ti, t in enumerate(targets):
+            v = native_per_target.get(t)
+            if v is not None and pd.notna(v):
+                ax.plot([ti - 0.4, ti + 0.4], [v, v], color='black',
+                        lw=1.5, alpha=0.8,
+                        label='native' if ti == 0 else None)
+        ax.set_xticks(range(n_t))
+        ax.set_xticklabels(targets, rotation=45, ha='right', fontsize=8)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.legend(fontsize=8, loc='best', ncol=min(n_m + 1, 4))
+        if ylim is not None:
+            ax.set_ylim(ylim)
+        ax.grid(axis='y', alpha=0.3)
+        fig.tight_layout()
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f'[plot_md_eval] grouped_bar -> {os.path.relpath(out_path, out_dir)}')
+
+    for (mode, md_mode), sub in summary.groupby(['mode', 'md_mode']):
+        if sub.empty:
+            continue
+        bar_dir = os.path.join(plots_root, mode, md_mode)
+
+        # Native contacts preserved (Cβ-Cβ, advisor-recommended observable)
+        if sub['native_contacts_mean'].notna().any():
+            _grouped_bar(
+                sub, 'native_contacts_mean',
+                ylabel='Fraction of native Cβ-Cβ contacts preserved',
+                title=f'{mode}/{md_mode}: native contacts preserved (post-eq mean, cutoff 8 Å)',
+                out_path=os.path.join(bar_dir, 'bar_native_contacts.png'),
+                ylim=(0, 1.05),
+            )
+
+        # Mean per-residue RMSF (advisor-recommended observable, time-averaged)
+        if sub['rmsf_mean'].notna().any():
+            _grouped_bar(
+                sub, 'rmsf_mean',
+                ylabel='Mean per-residue RMSF (Å)',
+                title=f'{mode}/{md_mode}: trajectory RMSF (mean across residues)',
+                out_path=os.path.join(bar_dir, 'bar_rmsf_mean.png'),
+            )
 
     print(f'[plot_md_eval] done -> {out_dir}')
 
