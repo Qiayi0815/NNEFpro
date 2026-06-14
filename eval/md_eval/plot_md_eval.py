@@ -110,6 +110,40 @@ def _native_contacts_fraction(traj: 'np.ndarray', native: 'np.ndarray',
     return out
 
 
+def _lddt_per_frame(traj: 'np.ndarray', native: 'np.ndarray',
+                    cutoff: float = 15.0,
+                    thresholds=(0.5, 1.0, 2.0, 4.0)) -> 'np.ndarray':
+    """Per-frame lDDT (local Distance Difference Test) of trajectory vs native.
+
+    For each residue i, lDDT_i = mean over interaction partners j (|i-j|>=1,
+    d_native(i,j) < cutoff) of (fraction of error thresholds at which
+    |d_md(i,j) - d_native(i,j)| < threshold). Per-frame lDDT = mean of lDDT_i.
+    Returns (F,) array in [0, 1]; 1 = perfect distance preservation.
+
+    Cross-protein comparable (length-normalized), insensitive to outlier
+    residues (RMSD's main weakness). The metric used by AlphaFold (pLDDT) and
+    CAMEO/CASP for quality assessment, here applied to MD trajectories."""
+    N = native.shape[0]
+    dn = np.linalg.norm(native[:, None, :] - native[None, :, :], axis=-1)
+    iarr, jarr = np.indices((N, N))
+    pair_mask = (np.abs(iarr - jarr) >= 1) & (dn < cutoff)
+    n_partners = pair_mask.sum(axis=1).astype(np.float32)
+    valid_res = n_partners > 0
+    n_thr = float(len(thresholds))
+
+    out = np.empty(traj.shape[0], dtype=np.float32)
+    for k, frame in enumerate(traj):
+        df = np.linalg.norm(frame[:, None, :] - frame[None, :, :], axis=-1)
+        d_err = np.abs(df - dn)
+        scores = np.zeros(N, dtype=np.float32)
+        for t in thresholds:
+            within = (d_err < t) & pair_mask  # (N, N) bool
+            scores += within.sum(axis=1).astype(np.float32) / np.maximum(n_partners, 1)
+        scores /= n_thr
+        out[k] = float(scores[valid_res].mean()) if valid_res.any() else 0.0
+    return out
+
+
 def _ca_only_ss(coords: 'np.ndarray') -> str:
     """Cα-only secondary-structure assignment (PROSS-style, Srinivasan &
     Rose 1999). Uses two geometric features at residue i:
@@ -247,12 +281,21 @@ def _load_run(run_dir: str) -> dict | None:
     native_ca = _native_coords_from_bead(native_bead, 'CA') if native_bead else None
 
     contacts = None
+    lddt = None
     native_ss = None
     if traj_coords is not None and native_cb is not None \
             and traj_coords.shape[1] == native_cb.shape[0]:
         contacts = _native_contacts_fraction(traj_coords, native_cb, cutoff=8.0)
+        lddt = _lddt_per_frame(traj_coords, native_cb, cutoff=15.0)
     if native_ca is not None:
         native_ss = _ca_only_ss(native_ca)
+
+    # Energy std (basin-width proxy) over post-equilibration frames.
+    # Computed here on the full energy column so consumers don't need the raw
+    # trajectory; _post_eq_mean is in main() so we keep the raw array here.
+    energy_post_eq = None
+    if 'energy' in traj.columns and len(traj) > 0:
+        energy_post_eq = traj['energy'].to_numpy(dtype=np.float32)
 
     return {
         'meta': meta,
@@ -261,6 +304,8 @@ def _load_run(run_dir: str) -> dict | None:
         'refs': df.iloc[:3],
         # Dynamic, time-independent (mean across post-equilibration frames):
         'native_contacts': contacts,            # (F,) Cβ-based fraction-preserved
+        'lddt': lddt,                            # (F,) per-frame lDDT in [0, 1]
+        'energy_trace': energy_post_eq,          # (F,) raw energy values
         # Static, per-protein context (not a model observable):
         'native_ss': native_ss,
         'native_h_frac': _ss_fractions(native_ss)[0] if native_ss else None,
@@ -386,6 +431,14 @@ def main() -> None:
             # Time-INdependent dynamic observable (post-equilibration mean):
             # what fraction of native Cβ-Cβ contacts (<8 Å) remain in MD.
             'native_contacts_mean': _post_eq_mean(r['native_contacts']),
+            # lDDT (length-normalized, outlier-robust structural similarity --
+            # gold standard for MD/structure quality, used by AlphaFold pLDDT).
+            'lddt_mean':            _post_eq_mean(r['lddt']),
+            # Energy std post-equilibration: proxy for basin width.
+            # Lower = tighter basin = "sharper" energy landscape.
+            'energy_std_post_eq':   (float(np.std(r['energy_trace'][max(1, int(len(r['energy_trace']) * 0.10)):]))
+                                     if r['energy_trace'] is not None and len(r['energy_trace']) > 10
+                                     else None),
             # Static native SS reference (computed once from real Cα, for
             # context only -- we cannot reliably assign SS to MD Cβ frames).
             'native_h_frac':        r['native_h_frac'],
@@ -661,6 +714,101 @@ def main() -> None:
                 title=f'{mode}/{md_mode}: trajectory RMSF (mean across residues)',
                 out_path=os.path.join(bar_dir, 'bar_rmsf_mean.png'),
             )
+
+        # lDDT (CASP/AlphaFold standard, length-normalized, outlier-robust)
+        if sub['lddt_mean'].notna().any():
+            _grouped_bar(
+                sub, 'lddt_mean',
+                ylabel='Mean lDDT (post-eq, vs native)',
+                title=f'{mode}/{md_mode}: lDDT (higher = closer to native, length-normalized)',
+                out_path=os.path.join(bar_dir, 'bar_lddt.png'),
+                ylim=(0, 1.05),
+            )
+
+        # Energy std (basin-width proxy; lower = sharper energy near native)
+        if sub['energy_std_post_eq'].notna().any():
+            _grouped_bar(
+                sub, 'energy_std_post_eq',
+                ylabel='Energy std (post-eq) — proxy for basin width',
+                title=f'{mode}/{md_mode}: trajectory energy fluctuation (lower = sharper basin)',
+                out_path=os.path.join(bar_dir, 'bar_energy_std.png'),
+            )
+
+    # --- Cross-model RMSF profile correlation -------------------------------
+    # For each protein with ≥2 models, compute pairwise Pearson correlation
+    # between each model's mean RMSF profile (averaged across seeds). High
+    # correlation = "models agree on which residues are flexible" (a sign
+    # that learned flexibility patterns are model-agnostic / capture real
+    # physics rather than model-specific artifacts).
+    for (mode, md_mode), grp_meta in summary.groupby(['mode', 'md_mode']):
+        runs_in_grp = [r for r in runs if r['mode'] == mode and r['md_mode'] == md_mode]
+        if not runs_in_grp:
+            continue
+        # Build per-(target, model_key) mean RMSF profile.
+        prof: dict[tuple[str, str], 'np.ndarray'] = {}
+        for r in runs_in_grp:
+            if r['rmsf'] is None:
+                continue
+            target = r['meta']['target']
+            model_key = _run_base_to_model_key(r['run_base'])
+            arr = r['rmsf']['rmsf'].to_numpy(dtype=np.float32)
+            prof.setdefault((target, model_key), []).append(arr)
+        if not prof:
+            continue
+        mean_prof = {k: np.stack([a[:min(len(x) for x in v)] for a in v]).mean(0)
+                     for k, v in prof.items()}
+        # For each target, pairwise model RMSF correlation
+        targets = sorted({t for (t, m) in mean_prof.keys()})
+        models = sorted({m for (t, m) in mean_prof.keys()})
+        if len(models) < 2 or not targets:
+            continue
+        corr_rows = []
+        for t in targets:
+            row = {'target': t}
+            for mi, m1 in enumerate(models):
+                for m2 in models[mi + 1:]:
+                    a = mean_prof.get((t, m1)); b = mean_prof.get((t, m2))
+                    if a is None or b is None:
+                        row[f'{m1}__{m2}'] = np.nan
+                        continue
+                    L = min(len(a), len(b))
+                    a, b = a[:L], b[:L]
+                    if a.std() == 0 or b.std() == 0:
+                        row[f'{m1}__{m2}'] = np.nan
+                    else:
+                        row[f'{m1}__{m2}'] = float(np.corrcoef(a, b)[0, 1])
+            corr_rows.append(row)
+        corr_df = pd.DataFrame(corr_rows).set_index('target')
+        # Write CSV + heatmap
+        bar_dir = os.path.join(plots_root, mode, md_mode)
+        os.makedirs(bar_dir, exist_ok=True)
+        corr_csv = os.path.join(bar_dir, 'rmsf_cross_model_correlation.csv')
+        corr_df.to_csv(corr_csv)
+
+        fig, ax = plt.subplots(figsize=(max(5.0, 0.8 * len(corr_df.columns) + 2),
+                                         0.32 * len(corr_df) + 1.5))
+        im = ax.imshow(corr_df.values, aspect='auto', cmap='RdBu_r',
+                       vmin=-1, vmax=1)
+        ax.set_xticks(range(len(corr_df.columns)))
+        ax.set_xticklabels(corr_df.columns, rotation=45, ha='right', fontsize=8)
+        ax.set_yticks(range(len(corr_df)))
+        ax.set_yticklabels(corr_df.index, fontsize=9)
+        for i in range(corr_df.shape[0]):
+            for j in range(corr_df.shape[1]):
+                v = corr_df.values[i, j]
+                if np.isfinite(v):
+                    ax.text(j, i, f'{v:.2f}', ha='center', va='center',
+                            color='white' if abs(v) > 0.6 else 'black',
+                            fontsize=7)
+        ax.set_title(f'{mode}/{md_mode}: pairwise RMSF profile correlation between models\n'
+                     f'(high = models agree on which residues are flexible)')
+        fig.colorbar(im, ax=ax, fraction=0.04)
+        fig.tight_layout()
+        out_path = os.path.join(bar_dir, 'rmsf_cross_model_correlation.png')
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f'[plot_md_eval] rmsf_corr -> {os.path.relpath(out_path, out_dir)}')
+        print(f'[plot_md_eval] rmsf_corr -> {os.path.relpath(corr_csv, out_dir)}')
 
     print(f'[plot_md_eval] done -> {out_dir}')
 
