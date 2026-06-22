@@ -18,7 +18,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 echo "==> rsync code -> ${REMOTE_HOST}:${REMOTE_REPO}"
+# eval/ handling: push *.py analysis/driver scripts under eval/decoys/ and
+# eval/md_eval/, but DON'T push any data (csv, pdb, png, dcd, h5, json,
+# subdirs of mode2_*, yang_*, 3dr_*, casp14_*, advisor_meeting/, etc.).
+# The include rules come BEFORE the catch-all `eval/**` exclude so they win.
 rsync -avh --progress \
+  --include='eval/' \
+  --include='eval/decoys/' \
+  --include='eval/decoys/*.py' \
+  --include='eval/md_eval/' \
+  --include='eval/md_eval/*.py' \
+  --exclude='eval/**' \
   --exclude='.git/' \
   --exclude='__pycache__/' \
   --exclude='.DS_Store' \
@@ -31,8 +41,9 @@ rsync -avh --progress \
   --exclude='.claude/' \
   --exclude='.claude.json' \
   --exclude='.omx/' \
-  --exclude='eval/' \
   --exclude='*.pdf' \
   ./ "${REMOTE_HOST}:${REMOTE_REPO}/"
 
 echo "Done. On cluster: cd ${REMOTE_REPO}"
+echo "  Pushed: code, fasrc/, nnef/scripts/, eval/decoys/*.py, eval/md_eval/*.py"
+echo "  NOT pushed: runs/, params/, *.h5, eval data, figures, decoys data"
