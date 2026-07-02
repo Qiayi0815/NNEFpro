@@ -24,6 +24,9 @@ class LocalGenTrainer:
 
         self.log_freq = args.log_interval
         self.writer = writer
+        # Gradient clipping is OFF by default to match Yang 2022 (no clip). Set
+        # --grad_clip_norm > 0 to re-enable the previous max_norm=1.0 behaviour.
+        self.grad_clip_norm = float(getattr(args, 'grad_clip_norm', 0.0) or 0.0)
 
         print("Total Parameters:", sum(p.nelement() for p in self.model.parameters()))
 
@@ -106,7 +109,8 @@ class LocalGenTrainer:
             if flag == 'Train':
                 self.optim_schedule.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                if self.grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip_norm)
                 self.optim_schedule.step_and_update_lr()
 
             # Logging

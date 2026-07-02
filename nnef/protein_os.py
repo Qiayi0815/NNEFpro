@@ -772,13 +772,36 @@ class Protein(ProteinBase):
         dihedral_local = dihedral_local * (~nan_mask).unsqueeze(-1).to(dihedral_local.dtype)
         return dihedral_local.to(self.coords.dtype)
 
+    def _gather_rama_local(self, g_local):
+        """Gather per-block raw (phi, psi) + validity mask for the Ramachandran
+        ENERGY term at inference, mirroring the training rama h5 block layout
+        (num_blocks, 5+k, 2). This makes the mixture_rama head score the same
+        target at decoy/scoring time that it was trained on — without it, the
+        rama term is silently dropped from the inference energy (train/infer
+        mismatch). Returns (None, None) when no backbone dihedral cache is
+        available, e.g. CB-only MD, where phi/psi cannot be computed — there the
+        rama term is necessarily absent (a documented limitation).
+        """
+        if self.dihedral_full is None:
+            return None, None
+        L_chain = self.dihedral_full.shape[0]
+        invalid_idx = (g_local < 0) | (g_local >= L_chain)
+        clamped = g_local.clamp(min=0, max=L_chain - 1)
+        phi_psi = self.dihedral_full[clamped]                 # (num_blocks, 5+k, 2)
+        nan_mask = torch.isnan(phi_psi).any(dim=-1) | invalid_idx
+        rama = torch.nan_to_num(phi_psi, nan=0.0, posinf=0.0, neginf=0.0).to(self.coords.dtype)
+        rama_mask = (~nan_mask).to(self.coords.dtype)         # (num_blocks, 5+k)
+        return rama, rama_mask
+
     def get_energy(self, energy_fun):
         profile_local, coords_local, start_id, res_counts, g_local = self.get_local_struct()
         coords_cart, seq_offset, esm_local, dihedral_local = self._build_extras(
             coords_local, g_local)
+        rama_local, rama_mask_local = self._gather_rama_local(g_local)
         coords_local = self._local_cartesian_to_radian(coords_local)
         energy = energy_fun.forward(
             profile_local, coords_local, start_id, res_counts,
+            rama=rama_local, rama_mask=rama_mask_local,
             coords_cart=coords_cart, seq_offset=seq_offset, esm=esm_local,
             dihedral=dihedral_local,
         )
@@ -791,6 +814,7 @@ class Protein(ProteinBase):
         profile_local, coords_local, start_id, res_counts, g_local = self.get_local_struct()
         coords_cart, seq_offset, esm_local, dihedral_local = self._build_extras(
             coords_local, g_local)
+        rama_local, rama_mask_local = self._gather_rama_local(g_local)
         coords_local = self._local_cartesian_to_radian(coords_local)
         num = coords_local.size(0)
         residue_energy = np.zeros(num)
@@ -799,9 +823,12 @@ class Protein(ProteinBase):
             so_i = seq_offset[i:i+1] if seq_offset is not None else None
             em_i = esm_local[i:i+1] if esm_local is not None else None
             dh_i = dihedral_local[i:i+1] if dihedral_local is not None else None
+            rm_i = rama_local[i:i+1] if rama_local is not None else None
+            rk_i = rama_mask_local[i:i+1] if rama_mask_local is not None else None
             residue_energy[i] = energy_fun.forward(
                 profile_local[i:i+1], coords_local[i:i+1],
                 start_id[i:i+1], res_counts[i:i+1],
+                rama=rm_i, rama_mask=rk_i,
                 coords_cart=cc_i, seq_offset=so_i, esm=em_i, dihedral=dh_i,
             )
         return residue_energy

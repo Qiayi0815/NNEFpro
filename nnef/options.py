@@ -181,6 +181,9 @@ def get_local_gen_parser():
     parser.add_argument("--weight_decay", type=float, default=1e-6)
     parser.add_argument("--n_warmup_steps", type=int, default=5000)
     parser.add_argument("--steps_decay_scale", type=int, default=10000)
+    parser.add_argument("--grad_clip_norm", type=float, default=0.0,
+                        help="Max grad norm for clipping. 0 = OFF (Yang 2022 default). "
+                             "Set >0 (e.g. 1.0) to re-enable gradient clipping.")
 
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=0)
