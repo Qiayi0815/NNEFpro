@@ -545,6 +545,12 @@ class Protein(ProteinBase):
             cb_center_local = R @ (CB_cen - CA_cen)
             dist_local = torch.norm(cb_local - cb_center_local.unsqueeze(0), dim=-1)
 
+            # A missing CB in a decoy leaves NaN coords even when the N-CA-C
+            # frame is fine; `NaN >= cutoff` is False so the cutoff check below
+            # would NOT drop it and the NaN would reach the energy. Skip here.
+            if not torch.isfinite(cb_local).all():
+                continue
+
             dist_others = dist_glob[mask_others]
             c8 = int((dist_others < 8.0).sum().item())
             c10 = int((dist_others < 10.0).sum().item())

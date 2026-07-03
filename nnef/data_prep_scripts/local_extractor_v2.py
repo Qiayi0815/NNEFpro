@@ -193,6 +193,13 @@ def compute_local_frame(n: np.ndarray,
     Returns ``None`` if the geometry is degenerate (collinear backbone,
     atoms on top of each other, etc.), so the caller can skip this residue.
     """
+    # NaN/Inf guard: decoy structures (esp. CASP14 server models) can have
+    # missing backbone atoms -> NaN coords. `NaN < eps` is False, so the norm
+    # checks below do NOT catch them and a NaN frame would propagate into a NaN
+    # energy (only ~24/495 T1053 decoys survived before this guard). Bail here
+    # so the caller skips the block instead.
+    if not (np.all(np.isfinite(n)) and np.all(np.isfinite(ca)) and np.all(np.isfinite(c))):
+        return None
     x_vec = n - ca
     x_norm = np.linalg.norm(x_vec)
     if x_norm < eps:

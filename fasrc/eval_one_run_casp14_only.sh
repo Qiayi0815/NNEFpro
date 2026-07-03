@@ -104,8 +104,27 @@ case "$EVAL_MODE" in
       --esm_dim_out 32
     )
     ;;
+  ribbon|v1_rama)
+    # ribbon = v2 N-CA-C frame + Ramachandran head only (mixture_rama 10 already
+    # in the base CMD). No cart/offset/dihedral/esm. v2 frame => no legacy flag.
+    : ;;
+  esm|v1_esm)
+    # esm = ribbon + ESM adapter (NO cart/offset/dihedral). ESM_H5 must contain
+    # per-residue embeddings for the DECOY proteins (CASP14 targets), not the
+    # training set — pass ESM_H5=<casp14 esm cache>.
+    if [[ ! -f "$ESM_H5" ]]; then
+      echo "[eval_one_run_c14] ERROR: esm mode needs ESM cache for the decoy targets: $ESM_H5"
+      exit 1
+    fi
+    CMD+=(
+      --use_esm
+      --esm_h5_path "$ESM_H5"
+      --esm_dim_in 1152
+      --esm_dim_out 32
+    )
+    ;;
   *)
-    echo "[eval_one_run_c14] ERROR: EVAL_MODE must be v2_dihedral or v3_full, got: $EVAL_MODE"
+    echo "[eval_one_run_c14] ERROR: EVAL_MODE must be v2_dihedral | v3_full | ribbon | esm, got: $EVAL_MODE"
     exit 1
     ;;
 esac
