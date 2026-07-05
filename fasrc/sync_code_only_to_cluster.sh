@@ -24,6 +24,7 @@ echo "==> rsync code -> ${REMOTE_HOST}:${REMOTE_REPO}"
 # The include rules come BEFORE the catch-all `eval/**` exclude so they win.
 rsync -avh --progress \
   --include='eval/' \
+  --include='eval/*.py' \
   --include='eval/decoys/' \
   --include='eval/decoys/*.py' \
   --include='eval/md_eval/' \

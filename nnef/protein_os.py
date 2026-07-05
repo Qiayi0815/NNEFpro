@@ -548,7 +548,14 @@ class Protein(ProteinBase):
             # A missing CB in a decoy leaves NaN coords even when the N-CA-C
             # frame is fine; `NaN >= cutoff` is False so the cutoff check below
             # would NOT drop it and the NaN would reach the energy. Skip here.
-            if not torch.isfinite(cb_local).all():
+            # Must check BOTH the neighbour CBs (cb_local) AND the central
+            # residue's CB (via cb_center_local): a Gly / missing-CB *center*
+            # leaves cb_local finite but cb_center_local NaN -> dist_local NaN ->
+            # passes the cutoff test -> NaN energy. This is exactly why ribbon
+            # (v2 frame, uses CB_cen) NaN'd on 471/495 T1053 decoys while yang
+            # (legacy frame, no CB_cen) scored all 495.
+            if not (torch.isfinite(cb_local).all()
+                    and torch.isfinite(cb_center_local).all()):
                 continue
 
             dist_others = dist_glob[mask_others]

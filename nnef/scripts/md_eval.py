@@ -79,6 +79,38 @@ def _resolve_bead_path(explicit: str | None, decoy_set: str, target: str, filena
     return path
 
 
+def _load_md_esm(args, n_res, device):
+    """Per-residue ESM embedding for the MD target, or None (mirrors decoy_score).
+
+    Without this, an --use_esm MD builds the Protein with ``esm_full=None`` so
+    the ESM adapter is fed nothing and the esm model runs degenerately (the CB
+    coords carry no ESM signal). Cache is keyed by ``args.target`` (e.g. 3KXT);
+    the embedding must align 1:1 with the protein's residues, matching the
+    ``esm_full.shape[0] == coords.shape[0]`` assert in Protein.
+    """
+    if not getattr(args, 'use_esm', False):
+        return None
+    path = getattr(args, 'esm_h5_path', None)
+    if not path or not os.path.isfile(path):
+        print(f'[md_eval] --use_esm set but esm cache missing ({path}); no-ESM')
+        return None
+    import h5py
+    key = args.target
+    with h5py.File(path, 'r') as f:
+        if key not in f:
+            print(f'[md_eval] WARN: {key!r} not in esm cache {path} '
+                  f'(keys={list(f.keys())[:6]}); running no-ESM')
+            return None
+        entry = f[key]
+        arr = entry['esm'][...] if hasattr(entry, 'keys') and 'esm' in entry else entry[...]
+    if arr.shape[0] != n_res:
+        print(f'[md_eval] WARN: esm L={arr.shape[0]} != protein L={n_res} for '
+              f'{key}; running no-ESM')
+        return None
+    print(f'[md_eval] loaded ESM for {key}: {tuple(arr.shape)}')
+    return torch.from_numpy(np.asarray(arr)).to(device)
+
+
 def _load_start_and_native(args, device):
     """Return (seq, coords_init, coords_native, profile).
 
@@ -259,12 +291,16 @@ def main() -> None:
 
     seq, coords_init, coords_native, profile = _load_start_and_native(args, device)
 
-    protein_native = Protein(seq, coords_native, profile)
+    # Per-residue ESM embedding for the esm model (v1_rama_esm). None for the
+    # other models and when --use_esm is off, keeping their energy path intact.
+    esm_full = _load_md_esm(args, coords_native.shape[0], device)
+
+    protein_native = Protein(seq, coords_native, profile, esm_full=esm_full)
     energy_native = float(protein_native.get_energy(energy_fn).item())
     rg2_native, _ = protein_native.get_rad_gyration(coords_native)
     print(f'[md_eval] energy_native={energy_native:.3f} rg_native={rg2_native.item() ** 0.5:.3f}')
 
-    protein = Protein(seq, coords_init.clone(), profile.clone())
+    protein = Protein(seq, coords_init.clone(), profile.clone(), esm_full=esm_full)
     energy_init = float(protein.get_energy(energy_fn).item())
     print(f'[md_eval] energy_init={energy_init:.3f}')
 
