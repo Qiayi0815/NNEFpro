@@ -354,6 +354,10 @@ def build_parser():
                        help='Force re-scoring even if the output csv already exists.')
     group.add_argument('--plot', action='store_true', default=False,
                        help='Produce a per-target scatter plot and a per-decoy_set boxplot.')
+    group.add_argument('--decompose_energy', action='store_true', default=False,
+                       help='Also write per-term energy columns (loss_r, loss_angle, '
+                            'loss_profile, ...) to <pdb>_decoy_loss.csv, to diagnose '
+                            'which term drives the decoy correlation.')
     group.add_argument('--out_dir', type=str, default='eval/default',
                        help='Directory for summary.csv, plots/, and comparison.csv.')
     group.add_argument('--compare_exps', type=str, default='',

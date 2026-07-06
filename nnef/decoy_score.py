@@ -220,6 +220,12 @@ def score_target(pdb_id, decoy_set, decoy_loss_dir, args, device, energy_fn,
     decoy_list = df['NAME'].values
 
     loss_all = []
+    # Optional per-term breakdown (--decompose_energy): which energy term drives
+    # the decoy correlation. Columns match forward()'s return order.
+    _decompose = getattr(args, 'decompose_energy', False)
+    _TERM_NAMES = ['loss_r', 'loss_angle', 'loss_profile',
+                   'loss_start_id', 'loss_res_counts', 'loss_rama']
+    term_lists = {k: [] for k in _TERM_NAMES}
 
     if args.static_decoy:
         # Preserved for historical reasons; requires a DatasetLocalGenOS class
@@ -285,7 +291,13 @@ def score_target(pdb_id, decoy_set, decoy_loss_dir, args, device, energy_fn,
                 n_coords=n_xyz, ca_coords=ca_xyz, c_coords=c_xyz,
                 chain_group_num=chain_group_num,
             )
-            energy = protein.get_energy(energy_fn).item()
+            if _decompose:
+                energy_t, terms = protein.get_energy(energy_fn, return_terms=True)
+                energy = energy_t.item()
+                for name, t in zip(_TERM_NAMES, terms or []):
+                    term_lists[name].append(float(t.item()))
+            else:
+                energy = protein.get_energy(energy_fn).item()
 
             if args.relax:
                 minimizer = GradMinimizerCartesian(
@@ -308,6 +320,10 @@ def score_target(pdb_id, decoy_set, decoy_loss_dir, args, device, energy_fn,
     print(f'[score_target] {pdb_id}: {len(loss_all)} decoys, first loss = {loss_all[0]:.3f}')
 
     df['loss'] = np.array(loss_all)
+    if _decompose:
+        for name, vals in term_lists.items():
+            if len(vals) == len(loss_all):
+                df[name] = np.array(vals)
     df.to_csv(out_csv, index=False)
     return df
 

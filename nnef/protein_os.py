@@ -806,20 +806,37 @@ class Protein(ProteinBase):
         rama_mask = (~nan_mask).to(self.coords.dtype)         # (num_blocks, 5+k)
         return rama, rama_mask
 
-    def get_energy(self, energy_fun):
+    def get_energy(self, energy_fun, return_terms=False):
+        """Total learned energy. With ``return_terms=True`` also returns the
+        per-term breakdown ``(loss_r, loss_angle, loss_profile, loss_start_id,
+        loss_res_counts, loss_rama)`` -- used to diagnose which term drives a
+        decoy correlation (e.g. why ESM collapses decoy ranking: the profile
+        term stops tracking structure). Backward compatible: default returns
+        the scalar total exactly as before.
+        """
         profile_local, coords_local, start_id, res_counts, g_local = self.get_local_struct()
         coords_cart, seq_offset, esm_local, dihedral_local = self._build_extras(
             coords_local, g_local)
         rama_local, rama_mask_local = self._gather_rama_local(g_local)
         coords_local = self._local_cartesian_to_radian(coords_local)
-        energy = energy_fun.forward(
+        prev = getattr(energy_fun, 'return_loss_terms', False)
+        if return_terms:
+            energy_fun.return_loss_terms = True
+        out = energy_fun.forward(
             profile_local, coords_local, start_id, res_counts,
             rama=rama_local, rama_mask=rama_mask_local,
             coords_cart=coords_cart, seq_offset=seq_offset, esm=esm_local,
             dihedral=dihedral_local,
         )
+        energy_fun.return_loss_terms = prev
+        if isinstance(out, tuple):
+            energy, terms = out[0], out[1:]
+        else:
+            energy, terms = out, None
         if self.use_ref:
             energy = energy - self.energy_seq
+        if return_terms:
+            return energy, terms
         return energy
 
     def get_residue_energy(self, energy_fun):
