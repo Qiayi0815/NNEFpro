@@ -120,6 +120,8 @@ ARCH_SHARED=(
   --attn_heads 4
   --mixture_r 2
   --mixture_angle 3
+  --angle_dist "${ANGLE_DIST:-gaussian}"
+  --r_dist "${R_DIST:-gaussian}"
   --smooth_gaussian
   --smooth_r 0.3
   --smooth_angle 45

@@ -439,6 +439,12 @@ class LocalEnergyCE(nn.Module):
         self.m_r = args.mixture_r
         self.m_angle = args.mixture_angle
         self.m_rama = args.mixture_rama  # NEW
+        # Output distribution family for the structure head. See options.py.
+        #   angle_dist: gaussian | vonmises (circular phi+rama) | vmf (sphere dir)
+        #   r_dist:     gaussian | lognormal (positive, right-skewed distance)
+        # Defaults keep old checkpoints bit-identical.
+        self.angle_dist = getattr(args, 'angle_dist', 'gaussian')
+        self.r_dist = getattr(args, 'r_dist', 'gaussian')
 
         self.random_ref = args.random_ref
         self.smooth_gaussian = args.smooth_gaussian
@@ -603,22 +609,80 @@ class LocalEnergyCE(nn.Module):
             x = torch.sum(x * w, dim=-1)
             return -torch.log(x + 1e-9)
 
+        def vonmises_1d(x, mu, kappa):
+            # Circular density: exp(k*cos(x-mu)) / (2*pi*I0(k)). Written with the
+            # exp-scaled Bessel i0e (I0(k)=i0e(k)*exp(k)) so the exponent is <=0:
+            #   pdf = exp(k*(cos(x-mu)-1)) / (2*pi*i0e(k))
+            # No angle wrapping needed -- cos is 2*pi-periodic (the whole point of
+            # von Mises vs the wrapped Gaussian's _wrap_to_mu hack).
+            i0e = torch.special.i0e(kappa)
+            return torch.exp(kappa * (torch.cos(x - mu) - 1.0)) / (2 * np.pi * i0e + 1e-9)
+
+        # sigma -> concentration for the circular terms (small-angle correspondence
+        # kappa ~ 1/sigma^2). Reuses the network's existing sigma outputs, so
+        # smooth_gaussian's sigma floor becomes a kappa ceiling for free.
+        def sigma_to_kappa(sigma):
+            return 1.0 / (sigma ** 2 + 1e-6)
+
+        def vmf_s2_pdf(mu_dot_x, kappa):
+            # von Mises-Fisher on the 2-sphere (p=3): C3(k) exp(k mu.x),
+            # C3(k) = k / (4*pi*sinh k). Computed in log space for stability
+            # (mu_dot_x in [-1,1] so k*(mu.x-1) <= 0; -log(1-e^{-2k}) via -expm1):
+            #   log f = log k - log(2*pi) - log(1-e^{-2k}) + k*(mu.x - 1)
+            k = kappa.clamp(min=1e-3, max=1e4)
+            log_f = (torch.log(k) - np.log(2 * np.pi)
+                     - torch.log(-torch.expm1(-2 * k)) + k * (mu_dot_x - 1.0))
+            return torch.exp(log_f)
+
         # --- r loss ---
-        loss_r = normal_1d(r, r_mu, r_sigma)
-        loss_r = log_weighted_sum(loss_r, r_pi)
+        if self.r_dist == 'lognormal':
+            # log r ~ Normal(mu, sigma); pdf(r) = normal(log r) / r  (Jacobian).
+            # r_mu/r_sigma are reinterpreted as the mean/sd of log r.
+            r_pos = r.clamp(min=1e-6)
+            pdf_r = normal_1d(torch.log(r_pos), r_mu, r_sigma) / r_pos
+            loss_r = log_weighted_sum(pdf_r, r_pi)
+        else:
+            loss_r = log_weighted_sum(normal_1d(r, r_mu, r_sigma), r_pi)
         loss_r = torch.mean(loss_r)
 
-        # --- (theta, phi) angle loss (wrap phi to nearest mu) ---
-        phi_rep = phi.repeat([1, 1, self.m_angle])
-        phi_w = _wrap_to_mu(phi_rep, angle_mu2)
-
-        loss_angle1 = normal_2d(theta[:, 2:], phi_w[:, 2:], angle_mu1[:, 2:], angle_mu2[:, 2:],
-                                angle_sigma1[:, 2:], angle_sigma2[:, 2:], angle_corr[:, 2:])
-        loss_angle1 = log_weighted_sum(loss_angle1, angle_pi[:, 2:])
-        # keep your indexing convention for the second term
-        loss_angle2 = normal_1d(phi_w[:, 1], angle_mu2[:, 1], angle_sigma2[:, 1])
-        loss_angle2 = log_weighted_sum(loss_angle2, angle_pi[:, 1])
-        loss_angle = torch.mean(loss_angle1) + torch.mean(loss_angle2)
+        # --- (theta, phi) angle loss ---
+        if self.angle_dist == 'vmf':
+            # Treat (theta, phi) at positions [2:] as a DIRECTION (unit vector) and
+            # model it with von Mises-Fisher on S^2. mu.x = cos(angular distance) via
+            # the spherical law of cosines (no phi wrapping needed). Single kappa per
+            # component from the two angular sigmas. Position 1 (phi-only) stays 1D
+            # von Mises. Rama (torus) handled below with von Mises, not vMF.
+            theta_rep = theta.repeat([1, 1, self.m_angle])
+            phi_rep = phi.repeat([1, 1, self.m_angle])
+            kappa = 2.0 / (angle_sigma1 ** 2 + angle_sigma2 ** 2 + 1e-6)
+            mu_dot_x = (torch.sin(angle_mu1) * torch.sin(theta_rep) * torch.cos(phi_rep - angle_mu2)
+                        + torch.cos(angle_mu1) * torch.cos(theta_rep))
+            loss_angle1 = log_weighted_sum(vmf_s2_pdf(mu_dot_x[:, 2:], kappa[:, 2:]), angle_pi[:, 2:])
+            k_phi = sigma_to_kappa(angle_sigma2)
+            loss_angle2 = vonmises_1d(phi_rep[:, 1], angle_mu2[:, 1], k_phi[:, 1])
+            loss_angle2 = log_weighted_sum(loss_angle2, angle_pi[:, 1])
+            loss_angle = torch.mean(loss_angle1) + torch.mean(loss_angle2)
+        elif self.angle_dist == 'vonmises':
+            # theta (polar, non-circular) stays Gaussian; phi (azimuthal, circular)
+            # uses von Mises. Independent product; correlation term (rho) dropped.
+            phi_rep = phi.repeat([1, 1, self.m_angle])
+            k_phi = sigma_to_kappa(angle_sigma2)
+            pdf_theta = normal_1d(theta[:, 2:], angle_mu1[:, 2:], angle_sigma1[:, 2:])
+            pdf_phi = vonmises_1d(phi_rep[:, 2:], angle_mu2[:, 2:], k_phi[:, 2:])
+            loss_angle1 = log_weighted_sum(pdf_theta * pdf_phi, angle_pi[:, 2:])
+            loss_angle2 = vonmises_1d(phi_rep[:, 1], angle_mu2[:, 1], k_phi[:, 1])
+            loss_angle2 = log_weighted_sum(loss_angle2, angle_pi[:, 1])
+            loss_angle = torch.mean(loss_angle1) + torch.mean(loss_angle2)
+        else:
+            # legacy wrapped-Gaussian (wrap phi to nearest mu)
+            phi_rep = phi.repeat([1, 1, self.m_angle])
+            phi_w = _wrap_to_mu(phi_rep, angle_mu2)
+            loss_angle1 = normal_2d(theta[:, 2:], phi_w[:, 2:], angle_mu1[:, 2:], angle_mu2[:, 2:],
+                                    angle_sigma1[:, 2:], angle_sigma2[:, 2:], angle_corr[:, 2:])
+            loss_angle1 = log_weighted_sum(loss_angle1, angle_pi[:, 2:])
+            loss_angle2 = normal_1d(phi_w[:, 1], angle_mu2[:, 1], angle_sigma2[:, 1])
+            loss_angle2 = log_weighted_sum(loss_angle2, angle_pi[:, 1])
+            loss_angle = torch.mean(loss_angle1) + torch.mean(loss_angle2)
 
         # --- Ramachandran loss alignment (FIX) ---
         # coords targets are length L-1; align Rama to the same by dropping the first position
@@ -634,11 +698,19 @@ class LocalEnergyCE(nn.Module):
             phi_rep_r = phi_ram.repeat([1, 1, self.m_rama])
             psi_rep_r = psi_ram.repeat([1, 1, self.m_rama])
 
-            phi_wr = _wrap_to_mu(phi_rep_r, rama_mu_phi)
-            psi_wr = _wrap_to_mu(psi_rep_r, rama_mu_psi)
-
-            rama_pdf = normal_2d(phi_wr, psi_wr, rama_mu_phi, rama_mu_psi,
-                                 rama_sigma_phi, rama_sigma_psi, rama_corr)
+            if self.angle_dist in ('vonmises', 'vmf'):
+                # Ramachandran (phi,psi) lives on a TORUS, not a sphere -> product of
+                # two von Mises (independent; rama_corr dropped) for both the
+                # 'vonmises' and 'vmf' families. No _wrap_to_mu.
+                k_phi_r = sigma_to_kappa(rama_sigma_phi)
+                k_psi_r = sigma_to_kappa(rama_sigma_psi)
+                rama_pdf = (vonmises_1d(phi_rep_r, rama_mu_phi, k_phi_r) *
+                            vonmises_1d(psi_rep_r, rama_mu_psi, k_psi_r))
+            else:
+                phi_wr = _wrap_to_mu(phi_rep_r, rama_mu_phi)
+                psi_wr = _wrap_to_mu(psi_rep_r, rama_mu_psi)
+                rama_pdf = normal_2d(phi_wr, psi_wr, rama_mu_phi, rama_mu_psi,
+                                     rama_sigma_phi, rama_sigma_psi, rama_corr)
             rama_nll = -torch.log(torch.sum(rama_pdf * rama_pi, dim=-1) + 1e-9)  # (N, L-1)
 
             if rama_mask is not None:

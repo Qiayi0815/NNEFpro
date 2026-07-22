@@ -58,6 +58,20 @@ def get_common_parser():
     parser.add_argument("--coords_rama_loss_lamda", type=float, default=1.0,
                         help="weight of the Ramachandran NLL term in the total loss")
 
+    parser.add_argument("--angle_dist", type=str, default='gaussian',
+                        choices=['gaussian', 'vonmises', 'vmf'],
+                        help="output distribution for angles. 'gaussian' = legacy "
+                             "wrapped-Gaussian mixture; 'vonmises' = circular von Mises "
+                             "on phi + Ramachandran phi/psi (theta stays Gaussian); "
+                             "'vmf' = von Mises-Fisher on S^2 for the (theta,phi) "
+                             "DIRECTION as a unit vector (Ramachandran still von Mises, "
+                             "it lives on a torus). Ablation flag; default bit-identical.")
+    parser.add_argument("--r_dist", type=str, default='gaussian',
+                        choices=['gaussian', 'lognormal'],
+                        help="output distribution for the radial distance r (>0). "
+                             "'gaussian' = legacy; 'lognormal' = positive-support, "
+                             "right-skewed mixture (r_mu/r_sigma reinterpreted as the "
+                             "mean/sd of log r). Ablation flag; default bit-identical.")
     parser.add_argument("--smooth_gaussian", action='store_true', default=False,
                         help='smooth the gaussian mixture function of r, theta, phi.')
     parser.add_argument("--smooth_r", type=float, default=0.3, help='minimum r_sigma = 0.3A')
