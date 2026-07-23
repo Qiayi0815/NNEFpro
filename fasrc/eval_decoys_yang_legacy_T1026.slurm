@@ -30,6 +30,11 @@ ENV_PREFIX="${ENV_PREFIX:-$HOME/envs/nnef}"
 DATA_DIR="${DATA_DIR:-$HOME/nnef_data}"
 LOAD_EXP="${LOAD_EXP:-runs/yang_legacy_7317784}"
 TARGET="${TARGET:-T1026}"
+# Angle/radial distribution ablation (see options.py --angle_dist/--r_dist).
+# MUST match how LOAD_EXP was trained -- a mismatch silently scores decoys
+# with the wrong distribution family, no error.
+ANGLE_DIST="${ANGLE_DIST:-gaussian}"
+R_DIST="${R_DIST:-gaussian}"
 
 module purge
 module load python/3.10.12-fasrc01
@@ -70,7 +75,7 @@ mkdir -p "$OUT_DIR"
 echo "----- decoy correlation: yang_legacy / CASP14 / $TARGET -----"
 hostname
 nvidia-smi
-echo "LOAD_EXP=$LOAD_EXP  TARGET=$TARGET  OUT_DIR=$OUT_DIR"
+echo "LOAD_EXP=$LOAD_EXP  TARGET=$TARGET  OUT_DIR=$OUT_DIR  ANGLE_DIST=$ANGLE_DIST  R_DIST=$R_DIST"
 echo "-------------------------------------------------------------"
 
 "$PY" -s nnef/scripts/evaluate_decoys.py \
@@ -94,6 +99,8 @@ echo "-------------------------------------------------------------"
   --attn_heads 4 \
   --mixture_r 2 \
   --mixture_angle 3 \
+  --angle_dist "$ANGLE_DIST" \
+  --r_dist "$R_DIST" \
   --smooth_gaussian \
   --smooth_r 0.3 \
   --smooth_angle 45 \

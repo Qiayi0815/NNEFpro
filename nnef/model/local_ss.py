@@ -558,7 +558,13 @@ class LocalEnergyCE(nn.Module):
         if self.smooth_gaussian:
             angle_sigma1 = angle_sigma1 + np.pi / 180.0 * self.smooth_angle
             angle_sigma2 = angle_sigma2 + np.pi / 180.0 * self.smooth_angle
-            r_sigma = r_sigma + self.smooth_r
+            # smooth_r is an ABSOLUTE floor in physical units (Angstrom), only
+            # meaningful when r_sigma IS the sigma of r itself (r_dist=gaussian).
+            # Under r_dist=lognormal, r_sigma is the sigma of log(r) (dimensionless,
+            # ~relative spread) -- adding the same 0.3 there is a ~35% relative-noise
+            # floor, a much larger and semantically different smoothing. Gate it.
+            if self.r_dist == 'gaussian':
+                r_sigma = r_sigma + self.smooth_r
 
         angle_corr = torch.tanh(z_angle[:, :, :, 5]).clamp(min=-0.99, max=0.99)
 
