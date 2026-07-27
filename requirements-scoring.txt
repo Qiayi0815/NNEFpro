@@ -1,0 +1,16 @@
+# Minimal dependencies to SCORE structures with a trained checkpoint
+# (nnef/scripts/score_for_collaborator.py). Does NOT include the extras
+# needed for training or building the training data (h5py, requests, etc).
+#
+#   conda create -n nnef-score python=3.10 -y
+#   conda activate nnef-score
+#   pip install -r requirements-scoring.txt
+
+torch>=2.0
+numpy>=1.24
+pandas>=1.5
+biopython>=1.81
+scipy>=1.10          # only needed if you pass --labels_csv for a Pearson/Spearman check
+
+# Optional, only for --checkpoint esm:
+# fair-esm

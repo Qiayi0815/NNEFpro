@@ -1,4 +1,11 @@
 
+> **Fork note:** this fork retrains the model on a larger dataset and adds a
+> Ramachandran head + v2 frame (`ribbon`), an ESM adapter (`esm`), and a
+> von&nbsp;Mises/von&nbsp;Mises&ndash;Fisher output-distribution ablation.
+> **Want to test a checkpoint on your own structures? Start at
+> [TESTING.md](TESTING.md)** — one command, no training data or cluster
+> access needed.
+
 Code for the following paper on [biorxiv](https://www.biorxiv.org/content/10.1101/2021.04.26.441401v1):
 
 Title: Construction of a neural network energy function for protein physics
