@@ -278,11 +278,17 @@ def main() -> None:
         'decoy':  dict(lr=1e-2, T_max=1e-2),
     }
     d = defaults_by_mode[args.md_mode]
-    # options.py defaults: lr=1e-3, T_max=0.1. Only override if CLI left them at default.
-    if args.lr == 1e-3:
+    # options.py defaults: lr=1e-3, T_max=0.1. Only fill in the mode default when
+    # the user did NOT pass the flag explicitly -- otherwise an explicit
+    # --lr 1e-3 (== options default) would be silently clobbered to the mode's
+    # lr (e.g. native 1e-2). Detect explicit passing from sys.argv.
+    _lr_explicit = any(a == '--lr' or a.startswith('--lr=') for a in sys.argv)
+    _tmax_explicit = any(a == '--T_max' or a.startswith('--T_max=') for a in sys.argv)
+    if not _lr_explicit and args.lr == 1e-3:
         args.lr = d['lr']
-    if abs(args.T_max - 0.1) < 1e-9:
+    if not _tmax_explicit and abs(args.T_max - 0.1) < 1e-9:
         args.T_max = d['T_max']
+    print(f'[md_eval] alpha(lr)={args.lr}  beta(T_max)={args.T_max}  L={args.L}')
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
