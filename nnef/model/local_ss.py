@@ -64,6 +64,23 @@ class LocalTransformer(nn.Module):
         self.linear_x = nn.Linear(2 * (args.embed_size // 4) + 3, args.dim)
         self.linear_s = nn.Linear(args.embed_size + args.embed_size // 4, args.dim)
 
+        # ---- Architecture variants (2026-10 group meeting; default = Yang) ----
+        # seq_head='masked_center': bidirectional identity decoder, slot 0 (the
+        #   block's central residue) masked, only its identity is scored ->
+        #   each residue counted once per chain (pseudo-likelihood head).
+        # struct_cond_seq: geometry tower conditioned on identities (slot k gets
+        #   s_k and s_{k+1}) -> -log p(x | seq); the identity decoder reads a
+        #   separate identity-free encoder so the target identity cannot leak.
+        self.seq_head = str(getattr(args, 'seq_head', 'causal'))
+        self.struct_cond_seq = bool(getattr(args, 'struct_cond_seq', False))
+        if (self.seq_head != 'causal' or self.struct_cond_seq) and self.seq_type != 'residue':
+            raise ValueError('seq_head/struct_cond_seq require --seq_type residue')
+        if self.seq_head == 'masked_center':
+            self.seq_mask_embed = nn.Parameter(torch.randn(1, 1, args.embed_size) * 0.02)
+        if self.struct_cond_seq:
+            self.aa_embedding_x = nn.Embedding(self.residue_type_num, args.embed_size)
+            self.linear_x_aa = nn.Linear(2 * args.embed_size, args.dim)
+
         if self.use_esm:
             self.esm_dim_in = int(getattr(args, 'esm_dim_in', 1280))
             self.esm_dim_out = int(getattr(args, 'esm_dim_out', 32))
@@ -144,6 +161,8 @@ class LocalTransformer(nn.Module):
         self._encoder1 = nn.TransformerEncoder(encoder_layer, args.n_layers // 2)
         self._encoder2 = nn.TransformerEncoder(encoder_layer, args.n_layers // 2)
         self._decoder = nn.TransformerDecoder(decoder_layer, args.n_layers)
+        if self.struct_cond_seq:
+            self._encoder_free = nn.TransformerEncoder(encoder_layer, args.n_layers // 2)
 
         # ---------------------- Output dimensions ----------------------
         self.connect_dim = 2
@@ -172,14 +191,20 @@ class LocalTransformer(nn.Module):
 
     def forward(self, seq, coords, start_id,
                 esm=None, coords_cart=None, seq_offset=None,
-                dihedral=None):
-        if self.seq_type == 'residue':
-            seq_feature = self.aa_embedding(seq)
+                dihedral=None, seq_full=None):
+        if self.seq_head == 'masked_center':
+            # All block identities, slot 0 replaced by a learned [MASK].
+            seq_feature = self.aa_embedding(seq_full)                    # (N, L+1, E)
+            mask_tok = self.seq_mask_embed.expand(seq_feature.size(0), 1, -1)
+            seq_feature = torch.cat((mask_tok, seq_feature[:, 1:]), dim=1)
         else:
-            seq_feature = self.linear_seq(seq)
+            if self.seq_type == 'residue':
+                seq_feature = self.aa_embedding(seq)
+            else:
+                seq_feature = self.linear_seq(seq)
 
-        seq_start_feature = self.seq_start_embed.weight.expand((seq_feature.size(0), -1, -1))
-        seq_feature = torch.cat((seq_start_feature, seq_feature), dim=1)  # (N, L+1, E)
+            seq_start_feature = self.seq_start_embed.weight.expand((seq_feature.size(0), -1, -1))
+            seq_feature = torch.cat((seq_start_feature, seq_feature), dim=1)  # (N, L+1, E)
 
         start_id_feature = self.start_id_embed(start_id)
         pos_x_feature = self.pos_x_embed.weight.expand((coords.size(0), -1, -1))
@@ -219,6 +244,12 @@ class LocalTransformer(nn.Module):
             # dihedral: (N, L, 4) -- (sin phi, cos phi, sin psi, cos psi).
             x_feature = x_feature + self.linear_x_dihedral(dihedral)
 
+        x_free = x_feature  # identity-free structure features
+        if self.struct_cond_seq:
+            aa_k = self.aa_embedding_x(seq_full)                          # (N, L+1, E)
+            aa_next = torch.cat((aa_k[:, 1:], torch.zeros_like(aa_k[:, :1])), dim=1)
+            x_feature = x_feature + self.linear_x_aa(torch.cat((aa_k, aa_next), dim=-1))
+
         s_feature = s_feature.transpose(0, 1)  # (L, N, E)
         x_feature = x_feature.transpose(0, 1)  # (L, N, E)
 
@@ -226,7 +257,11 @@ class LocalTransformer(nn.Module):
         out_x = self._encoder2(code_x, mask=self.mask)
         out_x = out_x.transpose(0, 1)  # (N, L, E)
 
-        out_s = self._decoder(s_feature, code_x, tgt_mask=self.mask)
+        memory = code_x
+        if self.struct_cond_seq:
+            memory = self._encoder_free(x_free.transpose(0, 1), mask=self.mask)
+        tgt_mask = None if self.seq_head == 'masked_center' else self.mask
+        out_s = self._decoder(s_feature, memory, tgt_mask=tgt_mask)
         out_s = out_s.transpose(0, 1)  # (N, L, E)
 
         out_x = self.linear_out_x(out_x)
@@ -464,6 +499,9 @@ class LocalEnergyCE(nn.Module):
         self.profile_loss_lamda = args.profile_loss_lamda
         self.coords_angle_loss_lamda = args.coords_angle_loss_lamda
         self.coords_rama_loss_lamda = args.coords_rama_loss_lamda  # NEW
+        self.profile_center_only = bool(getattr(args, 'energy_profile_center_only', False))
+        self.count_once = (str(getattr(args, 'seq_head', 'causal')) == 'masked_center'
+                           or bool(getattr(args, 'energy_profile_slot0_only', False)))
 
         if args.use_position_weights:
             position_weights = torch.ones((1, args.seq_len + 1))
@@ -489,7 +527,7 @@ class LocalEnergyCE(nn.Module):
         out_x, out_s = self.model(
             input_seq, input_coords, input_start_id,
             esm=esm, coords_cart=coords_cart, seq_offset=seq_offset,
-            dihedral=dihedral,
+            dihedral=dihedral, seq_full=seq,
         )
 
         # structure losses (r, angles, rama)
@@ -520,6 +558,15 @@ class LocalEnergyCE(nn.Module):
         # position-weighted sequence aggregation
         if self.position_weights is not None:
             loss_seq = loss_seq * self.position_weights  # (N, L)
+        if self.count_once:
+            # masked_center head (train + infer) or --energy_profile_slot0_only
+            # (infer): only the central residue's identity is scored.
+            loss_seq = loss_seq[:, :1]
+        elif self.profile_center_only:
+            # INFERENCE-only: score each residue identity once, as the central
+            # segment of its own block (positions 0-4); drop neighbour-slot
+            # identity terms, which re-count buried residues in many blocks.
+            loss_seq = loss_seq[:, :5]
         loss_seq = torch.sum(loss_seq, dim=-1)
         if self.reduction != 'keep_batch_dim':
             loss_seq = torch.mean(loss_seq)

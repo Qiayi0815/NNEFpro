@@ -245,6 +245,12 @@ fi
 if [[ -n "${NATIVE_BEAD:-}" ]]; then
   CMD+=( --native_bead "$NATIVE_BEAD" )
 fi
+# Free-form extra md_eval.py flags, e.g. MD_EXTRA="--energy_profile_weight 0.1".
+# Use a distinct OUT_ROOT so these runs do not overwrite the default ones.
+if [[ -n "${MD_EXTRA:-}" ]]; then
+  read -ra _MD_EXTRA <<< "$MD_EXTRA"
+  CMD+=( "${_MD_EXTRA[@]}" )
+fi
 
 echo "========== md_eval_one =========="
 echo "[md_eval_one] $(date '+%Y-%m-%d %H:%M:%S')"

@@ -63,6 +63,11 @@ class EnergyFun(nn.Module):
         # energy_fn returns the mean loss of batch. if residue_sum is True, use the sum of loss in the batch.
         self.residue_sum = residue_sum
         self.return_loss_terms = return_loss_terms
+        # Inference-only re-weighting of the sequence-profile term (default 1.0
+        # = trained energy). Langevin drift below native is carried by this term
+        # (eval/decomp/drift_terms_yang.csv), while decoy ranking saturates at
+        # w~0.1-0.3 (eval/decomp/profile_weight_scan.csv).
+        self.profile_weight = float(getattr(args, 'energy_profile_weight', 1.0))
         self.debug = args.debug
         if self.debug:
             self.writer = SummaryWriter('runs/fold/')
@@ -89,6 +94,8 @@ class EnergyFun(nn.Module):
         else:
             raise ValueError(f"Unexpected number of loss terms from energy_fn: {len(out)}")
 
+        if self.profile_weight != 1.0:
+            loss_profile = loss_profile * self.profile_weight
         energy = loss_r + loss_angle + loss_profile + loss_start_id + loss_res_counts + loss_rama
 
         if self.debug:

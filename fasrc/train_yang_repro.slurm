@@ -33,6 +33,12 @@ PDB_H5="${PDB_H5:-$NS/hhsuite_CB_yang.h5}"
 SEQ_H5="${SEQ_H5:-$NS/hhsuite_pdb_seq_yang.h5}"
 PDB_LIST="${PDB_LIST:-$DATA_DIR/hhsuite_CB_yang_pdb_list.csv}"
 EPOCHS="${EPOCHS:-200}"
+# Sequence-profile loss weight. Yang default 10; 1 = Bayes-consistent joint NLL
+# (-log p(seq|x) - log p(x)), see eval/decomp/drift_terms_yang.csv.
+PROFILE_LAMDA="${PROFILE_LAMDA:-10}"
+TOTAL_SAMPLES="${TOTAL_SAMPLES:-1000000}"
+# Extra train_chimeric.py flags, e.g. "--seq_head masked_center --struct_cond_seq".
+EXTRA_TRAIN="${EXTRA_TRAIN:-}"
 
 module purge
 module load python/3.10.12-fasrc01
@@ -52,7 +58,7 @@ for f in "$PDB_H5" "$SEQ_H5" "$PDB_LIST"; do
 done
 echo "[yang-repro] PDB_H5=$PDB_H5"
 echo "[yang-repro] SEQ_H5=$SEQ_H5"
-echo "[yang-repro] PDB_LIST=$PDB_LIST  EPOCHS=$EPOCHS"
+echo "[yang-repro] PDB_LIST=$PDB_LIST  EPOCHS=$EPOCHS  PROFILE_LAMDA=$PROFILE_LAMDA  EXTRA_TRAIN=$EXTRA_TRAIN"
 
 # Angle/radial output distribution ablation (see options.py). Default keeps the
 # Yang-faithful gaussian. Override: sbatch --export=ALL,ANGLE_DIST=vonmises,...
@@ -75,12 +81,13 @@ echo "[yang_repro] angle_dist=$ANGLE_DIST r_dist=$R_DIST"
     --grad_clip_norm 0 \
     --smooth_gaussian --smooth_r 0.3 --smooth_angle 45 \
     --lr 5e-5 --n_warmup_steps 5000 --steps_decay_scale 30000 \
-    --coords_angle_loss_lamda 1 --profile_loss_lamda 10 \
+    --coords_angle_loss_lamda 1 --profile_loss_lamda "$PROFILE_LAMDA" \
     --use_position_weights --cen_seg_loss_lamda 1 --oth_seg_loss_lamda 3 \
     --log_interval 30 --save_interval 50 --num_workers 4 \
-    --epochs "$EPOCHS" --total_num_samples 1000000 \
+    --epochs "$EPOCHS" --total_num_samples "$TOTAL_SAMPLES" \
     --pdb_h5_path "$PDB_H5" \
     --seq_h5_path "$SEQ_H5" \
-    --rama_h5_path "$DATA_DIR/__NO_RAMA_SENTINEL__.h5"
+    --rama_h5_path "$DATA_DIR/__NO_RAMA_SENTINEL__.h5" \
+    $EXTRA_TRAIN
 
 echo "[yang-repro] finished exit=$?"

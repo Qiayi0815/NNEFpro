@@ -95,6 +95,28 @@ def get_common_parser():
     parser.add_argument("--profile_prob", action='store_true', default=False, help="use target profile as weight")
 
     parser.add_argument("--device", type=str, default='cuda')
+    parser.add_argument("--energy_profile_weight", type=float, default=1.0,
+                        help="INFERENCE-only multiplier on the sequence-profile term in "
+                             "protein_os.EnergyFun (decoy scoring / MD). 1.0 = the trained "
+                             "energy (bit-identical). Training losses are unaffected.")
+    parser.add_argument("--energy_profile_slot0_only", action='store_true', default=False,
+                        help="INFERENCE-only: profile term scores ONLY slot 0 (the block's "
+                             "central residue i) -> each identity counted exactly once per chain.")
+    parser.add_argument("--seq_head", type=str, default='causal', choices=['causal', 'masked_center'],
+                        help="causal = Yang decoder (autoregressive over all 15 identities). "
+                             "masked_center = bidirectional decoder over the block's identities "
+                             "with slot 0 masked; predicts ONLY the central identity "
+                             "(count-once pseudo-likelihood head). Architecture flag: train and "
+                             "evaluate with the same value.")
+    parser.add_argument("--struct_cond_seq", action='store_true', default=False,
+                        help="Two-stream: the geometry tower sees identities (slot k gets "
+                             "s_k and s_{k+1}) so it models p(x | seq); the identity head reads "
+                             "a separate identity-free structure encoder (no leak). Architecture "
+                             "flag: train and evaluate with the same value.")
+    parser.add_argument("--energy_profile_center_only", action='store_true', default=False,
+                        help="INFERENCE-only: profile term scores only the 5 central-segment "
+                             "positions of each block (each residue identity counted once "
+                             "instead of also in neighbour slots). Do not use for training.")
 
     parser.add_argument("--debug", action='store_true', default=False)
 

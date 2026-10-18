@@ -78,8 +78,13 @@ nvidia-smi
 echo "LOAD_EXP=$LOAD_EXP  TARGET=$TARGET  OUT_DIR=$OUT_DIR  ANGLE_DIST=$ANGLE_DIST  R_DIST=$R_DIST"
 echo "-------------------------------------------------------------"
 
+# DECOMPOSE=1 also writes per-term energy columns to <pdb>_decoy_loss.csv.
+DECOMPOSE_ARG=()
+[[ "${DECOMPOSE:-0}" == "1" ]] && DECOMPOSE_ARG=(--decompose_energy)
+
 "$PY" -s nnef/scripts/evaluate_decoys.py \
   --load_exp "$LOAD_EXP" \
+  "${DECOMPOSE_ARG[@]}" \
   --mixture_seq 1 \
   --mixture_rama 0 \
   --legacy_local_frame \
