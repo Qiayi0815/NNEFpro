@@ -338,6 +338,20 @@ def main() -> None:
     ] + list(minimizer.sample)
     sample_energy = [energy_native, energy_best, energy_init] + list(minimizer.sample_energy)
 
+    # A trajectory that blew up (NaN/inf coordinates) is a RESULT, not a crash:
+    # keep the frames up to the first non-finite one and flag it in meta.json,
+    # so packed/requeued runs record the divergence instead of re-running it.
+    finite = [bool(torch.isfinite(f).all()) for f in sample]
+    diverged = not all(finite)
+    first_bad_frame = None
+    if diverged:
+        cut = finite.index(False)
+        first_bad_frame = cut - 3  # index among logged frames
+        sample, sample_energy = sample[:cut], sample_energy[:cut]
+        minimizer.sample = minimizer.sample[:max(0, cut - 3)]
+        print(f'[md_eval] DIVERGED: non-finite coords at logged frame {first_bad_frame} '
+              f'(step ~{first_bad_frame * args.trj_log_interval}); truncating')
+
     write_pdb_sample2(seq, sample, args.target, f'trajectory_{args.md_mode}', args.save_dir)
 
     sample_xyz = torch.stack(sample, 0).cpu().detach().numpy()
@@ -400,6 +414,8 @@ def main() -> None:
         'final_rmsd_to_start': final_rmsd_start,
         'rg_native': float(rg2_native.item() ** 0.5),
         'elapsed_sec': elapsed,
+        'diverged': diverged,
+        'first_nonfinite_frame': first_bad_frame,
     }
     with open(os.path.join(args.save_dir, 'meta.json'), 'w') as fh:
         json.dump(meta, fh, indent=2)
