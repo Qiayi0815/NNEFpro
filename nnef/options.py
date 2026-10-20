@@ -99,6 +99,9 @@ def get_common_parser():
                         help="INFERENCE-only multiplier on the sequence-profile term in "
                              "protein_os.EnergyFun (decoy scoring / MD). 1.0 = the trained "
                              "energy (bit-identical). Training losses are unaffected.")
+    parser.add_argument("--v2_fast", action='store_true', default=False,
+                        help="Use the vectorised torch v2 (N-CA-C) block builder; bit-identical "
+                             "blocks/energies to the reference pandas loop, ~300x faster.")
     parser.add_argument("--energy_profile_slot0_only", action='store_true', default=False,
                         help="INFERENCE-only: profile term scores ONLY slot 0 (the block's "
                              "central residue i) -> each identity counted exactly once per chain.")

@@ -55,6 +55,13 @@ def _topk_neighbor_g_local_mps_safe(
     return torch.cat((gs_cpu, gnum_dist_topk_sorted), dim=1).to(device)
 
 
+# Segment id base for terminal-block filler slots; MUST equal
+# data_prep_scripts.local_extractor_v2.FILLER_SEG_BASE (checked in
+# scripts/test_terminal_blocks.py). Kept local so this module does not import
+# the h5py/Biopython-dependent extractor.
+FILLER_SEG_BASE = 100
+
+
 class EnergyFun(nn.Module):
     def __init__(self, model, args, residue_sum=False, return_loss_terms=False):
         super().__init__()
@@ -136,6 +143,14 @@ class ProteinBase:
     seq_offset_max = 64
     use_esm = False
     use_dihedral = False
+    # 4-bead (N, CA, C, CB) dynamics: recompute (phi, psi) from the CURRENT
+    # backbone every energy call instead of the static dihedral_full cache, so
+    # the Ramachandran term is live (and differentiable) in MD. Off by default.
+    dynamic_rama = False
+    # Vectorised torch re-implementation of _get_local_struct_v2 (identical
+    # blocks/order/start_id; equivalence-tested in scripts/test_v2_differentiable.py).
+    # The reference version loops over residues with pandas -> far too slow for MD.
+    v2_fast = False
 
     def __init__(self):
         df = pd.read_csv(data_path('aa_freq_alpha-beta-train.csv'))
@@ -449,8 +464,162 @@ class Protein(ProteinBase):
         """
         if (ProteinBase.use_local_frame_v2 and self._has_v2_backbone()
                 and self.coords.size(0) >= (5 + self.k)):
+            if ProteinBase.v2_fast:
+                return self._get_local_struct_v2_fast()
             return self._get_local_struct_v2()
         return self._get_local_struct_legacy()
+
+    @staticmethod
+    def _frame_torch(n, ca, c, eps=1e-6):
+        """Differentiable twin of local_extractor_v2.compute_local_frame:
+        rows = (x_hat, y_hat, z_hat) with x along N-CA, y = (C-CA) orthogonalised."""
+        x = n - ca
+        x = x / x.norm().clamp_min(eps)
+        cv = c - ca
+        y = cv - (cv @ x) * x
+        y = y / y.norm().clamp_min(eps)
+        z = torch.cross(x, y, dim=-1)
+        z = z / z.norm().clamp_min(eps)
+        return torch.stack([x, y, z], dim=0)
+
+    def _phi_psi_torch(self):
+        """(L, 2) backbone (phi, psi) from current N/CA/C, NaN at the termini."""
+        n, ca, c = self.n_coords, self.ca_coords, self.c_coords
+
+        def dih(p1, p2, p3, p4):
+            b1, b2, b3 = p2 - p1, p3 - p2, p4 - p3
+            n1 = torch.cross(b1, b2, dim=-1)
+            n2 = torch.cross(b2, b3, dim=-1)
+            m1 = torch.cross(n1, b2 / b2.norm(dim=-1, keepdim=True).clamp_min(1e-12), dim=-1)
+            return torch.atan2((m1 * n2).sum(-1), (n1 * n2).sum(-1))
+
+        L = n.shape[0]
+        nan = torch.full((1,), float('nan'), dtype=n.dtype, device=n.device)
+        phi = torch.cat([nan, dih(c[:-1], n[1:], ca[1:], c[1:])])
+        psi = torch.cat([dih(n[:-1], ca[:-1], c[:-1], n[1:]), nan])
+        return torch.stack([phi, psi], dim=-1)
+
+    def _get_local_struct_v2_fast(self):
+        """Vectorised twin of _get_local_struct_v2 (same blocks, order, start_id)."""
+        CB, CA, Nx, Cx = self.coords, self.ca_coords, self.n_coords, self.c_coords
+        dev, dt = CB.device, CB.dtype
+        N, k = CB.size(0), self.k
+        bs = 5 + k
+        cutoff = float(ProteinBase.struct_v2_dist_cutoff)
+        if self.chain_group_num is not None:
+            gid = self.chain_group_num.to(dev).long()
+        else:
+            gid = torch.arange(N, device=dev)
+        srt = torch.sort(gid).values
+        terminal = torch.isin(gid, torch.cat([srt[:2], srt[-2:]]))
+        rows = torch.arange(N, device=dev)
+        # Interior windows need gc-2..gc+2 present; with contiguous ids that is
+        # rows i-2..i+2 holding gid+offsets.
+        offs = torch.tensor([-2, -1, 0, 1, 2], device=dev)
+        win = (rows[:, None] + offs).clamp(0, N - 1)                      # (N,5)
+        win_ok = (gid[win] == gid[:, None] + offs).all(dim=1)
+        valid = terminal | win_ok
+
+        with torch.no_grad():
+            D = torch.cdist(CB.detach(), CB.detach())                         # (N,N)
+            # interior: window + k nearest outside the window
+            Dm = D.clone()
+            Dm.scatter_(1, win, float('inf'))
+            idx = torch.cat([win, torch.argsort(Dm, dim=1)[:, :k]], dim=1)   # (N,5+k)
+            # segment labels: centre 0, -1->1, +1->2, -2->3, +2->4, others 5
+            dg = gid[idx] - gid[:, None]
+            seg_lab = torch.full_like(idx, 5)
+            for lab, off in ((0, 0), (1, -1), (2, 1), (3, -2), (4, 2)):
+                seg_lab[dg == off] = lab
+            others = torch.ones(N, N, dtype=torch.bool, device=dev)
+            others.scatter_(1, win, False)
+            filler = torch.zeros_like(idx, dtype=torch.bool)
+            # terminal centres (<= 4 rows): interior-style layout, missing window
+            # slots filled by the nearest non-window residues (mirrors
+            # local_extractor_v2.extract_blocks_v2 / _get_local_struct_v2).
+            for r in terminal.nonzero(as_tuple=True)[0].tolist():
+                gc = int(gid[r])
+                present, missing, win_rows = [], [], []
+                for off, sg in ((0, 0), (-1, 1), (1, 2), (-2, 3), (2, 4)):
+                    hit = (gid == gc + off).nonzero(as_tuple=True)[0]
+                    if hit.numel():
+                        present.append(sg)
+                        win_rows.append(int(hit[0]))
+                    else:
+                        missing.append(sg)
+                wm = torch.zeros(N, dtype=torch.bool, device=dev)
+                wm[win_rows] = True
+                n_fill = len(missing)
+                if int((~wm).sum()) < n_fill + k:
+                    valid[r] = False
+                    continue
+                dist_sort = D[r].clone()
+                dist_sort[wm] = float('inf')
+                order_r = torch.argsort(dist_sort)
+                idx[r] = torch.cat([torch.tensor(win_rows, device=dev), order_r[:n_fill + k]])
+                seg_lab[r] = torch.tensor(present + missing + [5] * k, device=dev)
+                filler[r] = False
+                filler[r, len(present):5] = True
+                others[r] = ~wm
+            cnt = torch.stack([((D < r) & others).sum(1) for r in (8.0, 10.0, 12.0)], dim=1).to(dt)
+
+        R = self._frames_torch(Nx, CA, Cx)                                   # (N,3,3)
+        cb_loc = torch.einsum('bij,bkj->bki', R, CB[idx] - CA[:, None, :])  # (N,15,3)
+        cen_loc = torch.einsum('bij,bj->bi', R, CB - CA)
+        dist_loc = (cb_loc - cen_loc[:, None, :]).norm(dim=-1)                # (N,15)
+
+        with torch.no_grad():
+            finite = torch.isfinite(cb_loc).all(dim=(1, 2)) & torch.isfinite(cen_loc).all(dim=1)
+            keep = valid & finite & (dist_loc.detach().max(dim=1).values < cutoff)
+            # ---- _re_order_block: sort by (segment, group_num) ----
+            g = gid[idx]
+            o1 = torch.argsort(g, dim=1, stable=True)
+            o1 = torch.gather(o1, 1, torch.argsort(torch.gather(seg_lab, 1, o1), dim=1, stable=True))
+            g1 = torch.gather(g, 1, o1)
+            d1 = torch.gather(dist_loc.detach(), 1, o1)
+            brk = torch.zeros_like(g1)
+            brk[:, 6:] = (g1[:, 6:] != g1[:, 5:-1] + 1).long()
+            seg = torch.ones_like(g1)
+            seg[:, 5:] = 2 + torch.cumsum(brk[:, 5:], dim=1)
+            f1 = torch.gather(filler, 1, o1)
+            pos = torch.arange(f1.size(1), device=dev).expand_as(f1)
+            seg = torch.where(f1 & (pos < 5), FILLER_SEG_BASE + pos, seg)
+            nseg = int(seg.max()) + 1
+            ssum = torch.zeros(N, nseg, device=dev, dtype=d1.dtype).scatter_add_(1, seg, d1)
+            scnt = torch.zeros(N, nseg, device=dev, dtype=d1.dtype).scatter_add_(1, seg, torch.ones_like(d1))
+            sdist = torch.gather(ssum / scnt.clamp_min(1), 1, seg)
+            # final sort by (segment, seg_dist, group_num): stable sorts, last key first
+            s1 = torch.gather(seg_lab, 1, o1)
+            o2 = torch.argsort(g1, dim=1, stable=True)
+            o2 = torch.gather(o2, 1, torch.argsort(torch.gather(sdist, 1, o2), dim=1, stable=True))
+            o2 = torch.gather(o2, 1, torch.argsort(torch.gather(s1, 1, o2), dim=1, stable=True))
+            order = torch.gather(o1, 1, o2)                                   # into idx columns
+            seg_o = torch.gather(seg, 1, o2)
+            start_id = torch.zeros_like(seg_o)
+            start_id[:, 1:] = (seg_o[:, 1:] == seg_o[:, :-1]).long()
+            g_local = torch.gather(idx, 1, order)
+
+        coords_local = torch.gather(cb_loc, 1, order[:, :, None].expand(-1, -1, 3))
+        kb = keep.nonzero(as_tuple=True)[0]
+        if kb.numel() == 0:
+            raise RuntimeError(
+                'v2 frame: every block was dropped (non-finite coords or span >= '
+                f'struct_dist_cutoff={cutoff} A). Refusing to fall back to the legacy '
+                'frame, which a v2-trained model was never trained on.')
+        g_local = g_local[kb]
+        return (self.profile[g_local], coords_local[kb], start_id[kb], cnt[kb], g_local)
+
+    @staticmethod
+    def _frames_torch(n, ca, c, eps=1e-6):
+        """Batched _frame_torch: (N,3) x3 -> (N,3,3), rows = x_hat, y_hat, z_hat."""
+        x = n - ca
+        x = x / x.norm(dim=-1, keepdim=True).clamp_min(eps)
+        cv = c - ca
+        y = cv - (cv * x).sum(-1, keepdim=True) * x
+        y = y / y.norm(dim=-1, keepdim=True).clamp_min(eps)
+        z = torch.cross(x, y, dim=-1)
+        z = z / z.norm(dim=-1, keepdim=True).clamp_min(eps)
+        return torch.stack([x, y, z], dim=1)
 
     def _get_local_struct_v2(self):
         """Mirror ``extract_blocks_v2`` + ``_re_order_block`` on the inference chain."""
@@ -507,13 +676,30 @@ class Protein(ProteinBase):
 
             is_terminal = (gc in first_two) or (gc in last_two)
 
+            filler_flags = np.zeros(block_size, dtype=bool)
             if is_terminal:
-                idx_combined = torch.argsort(dist_glob)[:block_size]
-                if idx_combined.numel() < block_size:
+                # Mirror local_extractor_v2.extract_blocks_v2: interior-style
+                # layout (centre in slot 0), missing window slots filled by
+                # the nearest non-window residues ('filler').
+                offsets = [(0, 0), (-1, 1), (1, 2), (-2, 3), (2, 4)]
+                present = [(off, sg) for off, sg in offsets if (gc + off) in id_to_row]
+                win_rows = [id_to_row[gc + off] for off, _ in present]
+                window_mask = torch.zeros(N, dtype=torch.bool, device=device)
+                window_mask[win_rows] = True
+                n_fill = 5 - len(present)
+                if int((~window_mask).sum().item()) < n_fill + k:
                     continue
-                mask_others = torch.ones(N, dtype=torch.bool, device=device)
-                mask_others[idx_combined] = False
-                segment_info = np.full(block_size, 5, dtype=np.int32)
+                dist_sort = dist_glob.clone()
+                dist_sort[window_mask] = float('inf')
+                order = torch.argsort(dist_sort)
+                idx_combined = torch.cat([
+                    torch.tensor(win_rows, device=device, dtype=torch.long),
+                    order[:n_fill + k]])
+                missing = [sg for off, sg in offsets if (gc + off) not in id_to_row]
+                segment_info = np.array([sg for _, sg in present] + missing + [5] * k,
+                                        dtype=np.int32)
+                filler_flags[len(present):5] = True
+                mask_others = ~window_mask
             else:
                 surr = [gc - 2, gc - 1, gc, gc + 1, gc + 2]
                 if not all(s in id_to_row for s in surr):
@@ -578,6 +764,7 @@ class Protein(ProteinBase):
                 dtype=np.int64,
             )
             df_blk = pd.DataFrame({
+                'filler': filler_flags,
                 'segment': segment_info,
                 'group_num': gnums_df,
                 'local_x': cb_local[:, 0].detach().cpu().numpy(),
@@ -590,6 +777,10 @@ class Protein(ProteinBase):
             })
             df_o = _re_order_block(df_blk)
             seg_o = df_o['seg'].values.astype(np.int8)
+            # Block membership/order above is discrete (no gradient, like the
+            # legacy top-k). The coordinates themselves are recomputed in torch
+            # below so forces reach N, CA, C and CB (the numpy round-trip used
+            # to cut autograd entirely -> v2 models could not drive MD).
             start_id_np = np.zeros_like(seg_o, dtype=np.int8)
             start_id_np[1:] = (seg_o[1:] == seg_o[:-1]).astype(np.int8)
 
@@ -597,10 +788,8 @@ class Protein(ProteinBase):
                 [id_to_row[int(gv)] for gv in df_o['group_num'].values],
                 device=device, dtype=torch.long,
             )
-            cb_o = torch.tensor(
-                df_o[['local_x', 'local_y', 'local_z']].values,
-                device=device, dtype=dtype,
-            )
+            R_t = self._frame_torch(N_xyz[cen_idx], CA[cen_idx], C_xyz[cen_idx])
+            cb_o = (R_t @ (CB[g_row] - CA_cen).T).T
             rc = torch.tensor(
                 df_o[['count8a', 'count10a', 'count12a']].values[0],
                 device=device, dtype=dtype,
@@ -613,7 +802,9 @@ class Protein(ProteinBase):
             gl_rows.append(g_row)
 
         if not prof_rows:
-            return self._get_local_struct_legacy()
+            raise RuntimeError(
+                'v2 frame: every block was dropped (non-finite coords or span >= '
+                f'struct_dist_cutoff={cutoff} A). Refusing to fall back to the legacy frame.')
 
         profile_local = torch.stack(prof_rows, dim=0)
         coords_local = torch.stack(coord_rows, dim=0)
@@ -707,14 +898,25 @@ class Protein(ProteinBase):
 
     @staticmethod
     def _local_cartesian_to_radian(coords_local):
-        # r = torch.norm(coords_local, dim=-1)  # (N-4, 5+k)
-        r = torch.norm(coords_local[:, 1:], dim=-1)  # (N-4, 5+k-1)  # exclude the origin
-        zr = coords_local[:, 1:, 2] / r
+        # Must mirror dataset/data_chimeric.py exactly: training uses the TRUE
+        # radius of every slot including slot 0, and divides by (r + 1e-6).
+        # Legacy frame: slot 0 (central Cβ) is the origin, so r0 = 0 either way.
+        # v2 frame: the origin is the central CA, so slot 0 sits ~1.5 Å away;
+        # padding r0 = 0 here (old behaviour) fed every v2 block an input never
+        # seen in training -> inverted start_id term, weaker r/angle terms and
+        # NaN energies when a Gly (Cβ == CA) landed in a non-zero slot of a
+        # terminal block. sqrt(.+1e-12) keeps MD gradients finite at r = 0.
+        if ProteinBase.use_local_frame_v2:
+            r_all = torch.sqrt((coords_local ** 2).sum(-1) + 1e-12)  # (B, 5+k)
+            r_rest = r_all[:, 1:]
+        else:
+            r_rest = torch.norm(coords_local[:, 1:], dim=-1)  # (B, 5+k-1), exclude the origin
+            r_all = F.pad(r_rest, (1, 0), value=0)
+        zr = coords_local[:, 1:, 2] / (r_rest + 1e-6)
         zr = torch.clamp(zr, min=-1.0 + 1e-6, max=1.0 - 1e-6)  # otherwise, acos(1.00001) results NaN
         theta = torch.acos(zr)  # exclude the origin
-        # theta = torch.acos(coords_local[:, 1:, 2] / r[:, 1:])  # exclude the origin
         phi = torch.atan2(coords_local[:, 1:, 1], coords_local[:, 1:, 0])  # atan2 considers the quadrant,
-        r = F.pad(r, (1, 0), value=0)
+        r = r_all
         theta = F.pad(theta, (1, 0), value=0)
         phi = F.pad(phi, (1, 0), value=0)
         coords = torch.stack((r, theta, phi), dim=2)  # (N-4, 5+k, 3)
@@ -802,12 +1004,15 @@ class Protein(ProteinBase):
         available, e.g. CB-only MD, where phi/psi cannot be computed — there the
         rama term is necessarily absent (a documented limitation).
         """
-        if self.dihedral_full is None:
+        dihedral_full = self.dihedral_full
+        if ProteinBase.dynamic_rama and self._has_v2_backbone():
+            dihedral_full = self._phi_psi_torch()
+        if dihedral_full is None:
             return None, None
-        L_chain = self.dihedral_full.shape[0]
+        L_chain = dihedral_full.shape[0]
         invalid_idx = (g_local < 0) | (g_local >= L_chain)
         clamped = g_local.clamp(min=0, max=L_chain - 1)
-        phi_psi = self.dihedral_full[clamped]                 # (num_blocks, 5+k, 2)
+        phi_psi = dihedral_full[clamped]                      # (num_blocks, 5+k, 2)
         nan_mask = torch.isnan(phi_psi).any(dim=-1) | invalid_idx
         rama = torch.nan_to_num(phi_psi, nan=0.0, posinf=0.0, neginf=0.0).to(self.coords.dtype)
         rama_mask = (~nan_mask).to(self.coords.dtype)         # (num_blocks, 5+k)

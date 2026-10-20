@@ -110,6 +110,7 @@ class DatasetLocalGenCM(Dataset):
                 self.has_esm = False
 
         self.group_num_dict = {}
+        self.seq_shift_dict = {}
         self.coords_dict = {}
         self.start_id_dict = {}
         self.res_counts_dict = {}
@@ -120,6 +121,8 @@ class DatasetLocalGenCM(Dataset):
         for pdb in tqdm(self.pdb_list):
             data_pdb = hh_data_pdb[pdb]
             self.group_num_dict[pdb] = data_pdb['group_num'][()]
+            # per-chain sequence-registration shift (0 for h5 built before the fix)
+            self.seq_shift_dict[pdb] = int(data_pdb['seq_shift'][0]) if 'seq_shift' in data_pdb else 0
             self.coords_dict[pdb] = data_pdb['coords'][()]
             self.start_id_dict[pdb] = data_pdb['start_id'][()]
             self.res_counts_dict[pdb] = data_pdb['res_counts'][()]
@@ -187,7 +190,9 @@ class DatasetLocalGenCM(Dataset):
         group_num_n = self.group_num_dict[pdb]
         i = torch.randint(0, group_num_n.shape[0], (1,))[0]
         group_num = group_num_n[i]
-        group_num = group_num - 1   # Shift from 1-based to 0-based
+        # 1-based PDB numbering -> 0-based index into the chimeric sequence,
+        # plus the chain's registration shift (local_extractor_v2 'seq_shift').
+        group_num = group_num - 1 + self.seq_shift_dict[pdb]
         start_id = self.start_id_dict[pdb][i]
         coords = self.coords_dict[pdb][i]
         res_counts = self.res_counts_dict[pdb][i]

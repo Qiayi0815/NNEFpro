@@ -226,6 +226,11 @@ def compute_local_frame(n: np.ndarray,
 # 3. Block extractor.
 # ---------------------------------------------------------------------------
 
+# Segment ids for terminal-block filler slots (see _re_order_block); far from
+# the 1..~15 ids used for chain-contiguous segments.
+FILLER_SEG_BASE = 100
+
+
 def _re_order_block(df_block: pd.DataFrame) -> pd.DataFrame:
     """Assign ``seg`` (group-num connectivity id) and sort block rows.
 
@@ -241,6 +246,14 @@ def _re_order_block(df_block: pd.DataFrame) -> pd.DataFrame:
     distance = df_block['distance'].values
 
     seg = np.ones(len(df_block), dtype=int)
+    # Terminal-centre blocks: a window slot whose residue does not exist
+    # (i-1/i-2 at the N-terminus, i+1/i+2 at the C-terminus) is filled by a
+    # nearest non-window residue ('filler'). Give each filler its own segment
+    # id so start_id marks it as NOT chain-connected. Interior blocks have no
+    # fillers -> identical to the original layout.
+    if 'filler' in df_block.columns:
+        for pos in np.where(df_block['filler'].values[:5])[0]:
+            seg[pos] = FILLER_SEG_BASE + int(pos)
     if len(seg) >= 6:
         seg[5] = 2
     for i in range(6, len(seg)):
@@ -261,9 +274,13 @@ def _build_block_df(center_num: int,
                     local_xyz: np.ndarray,
                     dist_local: np.ndarray,
                     segment_info: np.ndarray,
-                    counts: Tuple[int, int, int]) -> pd.DataFrame:
+                    counts: Tuple[int, int, int],
+                    filler: Optional[np.ndarray] = None) -> pd.DataFrame:
     c8, c10, c12 = counts
+    if filler is None:
+        filler = np.zeros(len(gnum_seg), dtype=bool)
     return pd.DataFrame({
+        'filler': filler,
         'center_num': center_num,
         'group_num': gnum_seg,
         'group_name': gname_seg,
@@ -281,11 +298,18 @@ def _build_block_df(center_num: int,
 def extract_blocks_v2(df_beads: pd.DataFrame, k: int = 10) -> Optional[pd.DataFrame]:
     """Compute v2 blocks for a single chain's bead CSV.
 
-    Returns a long DataFrame with ``15 * num_valid_blocks`` rows, or ``None``
-    if the chain has fewer than 15 residues or no block passes validity
-    checks.
+    Returns a long DataFrame with ``(5 + k) * num_valid_blocks`` rows, or
+    ``None`` if the chain has fewer than 5 + k residues or no block passes
+    validity checks.
+
+    Terminal centres (first/last two residues) use the SAME slot layout as
+    interior centres: slot 0 = centre, slots 1-4 = i-1, i+1, i-2, i+2 where
+    those residues exist; a missing window slot is filled by the nearest
+    non-window residue (flagged 'filler', own segment id); then the k nearest
+    remaining residues. (Before 2026-10-20 terminal blocks were the 15 nearest
+    residues sorted by residue number, so slot 0 was not the centre.)
     """
-    if df_beads.shape[0] < 15:
+    if df_beads.shape[0] < 5 + k:
         return None
 
     missing = [c for c in _BEAD_V2_COLS if c not in df_beads.columns]
@@ -325,13 +349,27 @@ def extract_blocks_v2(df_beads: pd.DataFrame, k: int = 10) -> Optional[pd.DataFr
 
         is_terminal = (gc in first_two) or (gc in last_two)
 
+        filler_flags = None
         if is_terminal:
-            # --- Terminal center: 15 nearest residues by Cβ distance ------
-            idx_combined = np.argsort(dist_glob)[:block_size]
-            if idx_combined.size < block_size:
+            # --- Terminal center: interior-style layout with fillers --------
+            offsets = [(0, 0), (-1, 1), (1, 2), (-2, 3), (2, 4)]  # (offset, segment)
+            present = [(off, seg) for off, seg in offsets if (gc + off) in group_num]
+            win_idx = [int(np.where(group_num == gc + off)[0][0]) for off, _ in present]
+            window_mask = np.zeros(len(group_num), dtype=bool)
+            window_mask[win_idx] = True
+            n_fill = 5 - len(present)
+            order = np.argsort(np.where(window_mask, np.inf, dist_glob))
+            if np.count_nonzero(~window_mask) < n_fill + k:
                 continue
-            mask_others = ~np.isin(np.arange(len(dist_glob)), idx_combined)
-            segment_info = np.full(block_size, 5, dtype=int)
+            fill_idx = order[:n_fill]
+            topk_idx = order[n_fill:n_fill + k]
+            missing_segs = [seg for off, seg in offsets if (gc + off) not in group_num]
+            idx_combined = np.concatenate([win_idx, fill_idx, topk_idx]).astype(int)
+            segment_info = np.concatenate([[seg for _, seg in present], missing_segs,
+                                           np.full(k, 5)]).astype(int)
+            filler_flags = np.zeros(block_size, dtype=bool)
+            filler_flags[len(present):5] = True
+            mask_others = ~window_mask
 
         else:
             # --- Interior center: peptide ±2 window + top-k others --------
@@ -378,6 +416,7 @@ def extract_blocks_v2(df_beads: pd.DataFrame, k: int = 10) -> Optional[pd.DataFr
             dist_local=dist_local,
             segment_info=segment_info,
             counts=(c8, c10, c12),
+            filler=filler_flags,
         )
         if df_block.shape[0] != block_size:
             continue
@@ -637,7 +676,7 @@ def _process_chain(task: tuple):
     )
     if match is None:
         return 'drop', pdb_id, 'no_chain_match'
-    chain, _ = match
+    chain, idx_offset = match
     df_beads = df_beads_all[df_beads_all['chain_id'] == chain].copy()
 
     try:
@@ -656,6 +695,15 @@ def _process_chain(task: tuple):
         return 'drop', pdb_id, 'unknown_residue'
 
     group_num = df_final['group_num'].values.reshape(-1, block_size)
+    # Sequence registration: the matcher found idx_offset such that the chimeric
+    # sequence position = PDB group_num + idx_offset, while the dataset reads the
+    # sequence at (group_num - 1). group_num stays the PDB numbering (the rama
+    # builder and every inference path look residues up by it); the per-chain
+    # correction is stored as 'seq_shift' = idx_offset + 1 and applied ONLY to
+    # the sequence lookup in dataset/data_chimeric.py. Before 2026-10-19 the
+    # offset was discarded -> ~60% of chains (numbering not starting at 1) were
+    # trained on misregistered sequences.
+    seq_shift = int(idx_offset) + 1
     coords    = df_final[['local_x', 'local_y', 'local_z']].values.reshape(-1, block_size, 3)
     seg       = df_final['seg'].values.reshape(-1, block_size)
     distance  = df_final['distance'].values.reshape(-1, block_size)
@@ -679,6 +727,7 @@ def _process_chain(task: tuple):
         'seg':        (seg[valid].astype(np.int16),      'i2'),
         'start_id':   (start_id[valid].astype(np.int8),  'i1'),
         'res_counts': (res_counts[valid].astype(np.int16), 'i2'),
+        'seq_shift':  (np.array([seq_shift], dtype=np.int32), 'i4'),
     }
     return 'ok', pdb_id, arrays
 

@@ -33,6 +33,8 @@ PDB_H5="${PDB_H5:-$NS/hhsuite_CB_yang.h5}"
 SEQ_H5="${SEQ_H5:-$NS/hhsuite_pdb_seq_yang.h5}"
 PDB_LIST="${PDB_LIST:-$DATA_DIR/hhsuite_CB_yang_pdb_list.csv}"
 EPOCHS="${EPOCHS:-200}"
+K="${K:-10}"                  # must match the h5 the model trains on
+SEQ_LEN="$((K + 4))"           # block = 5 + K positions, seq_len = block - 1
 # Sequence-profile loss weight. Yang default 10; 1 = Bayes-consistent joint NLL
 # (-log p(seq|x) - log p(x)), see eval/decomp/drift_terms_yang.csv.
 PROFILE_LAMDA="${PROFILE_LAMDA:-10}"
@@ -71,7 +73,7 @@ echo "[yang_repro] angle_dist=$ANGLE_DIST r_dist=$R_DIST"
     --save_path runs \
     --data_flag "$PDB_LIST" \
     --seq_type residue --residue_type_num 20 --chimeric \
-    --seq_len 14 \
+    --seq_len "$SEQ_LEN" \
     --batch_size 1000 \
     --embed_size 32 --dim 128 --n_layers 4 --attn_heads 4 \
     --mixture_r 2 --mixture_angle 3 --mixture_seq 1 \

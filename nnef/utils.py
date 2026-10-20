@@ -97,6 +97,7 @@ def test_setup(args):
         getattr(args, 'legacy_local_frame', False))
     ProteinBase.struct_v2_dist_cutoff = float(
         getattr(args, 'struct_dist_cutoff', 20.0))
+    ProteinBase.v2_fast = bool(getattr(args, 'v2_fast', False))
 
     return device, model, energy_fn, ProteinBase
 

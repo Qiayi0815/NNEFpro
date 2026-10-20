@@ -28,6 +28,7 @@ CHIM_DIR="${CHIM_DIR:-$NS/chimeric}"
 OUT_H5="${OUT_H5:-$NS/nnef_data/hhsuite_CB_v2_new.h5}"
 PDB_LIST="${PDB_LIST:-$DATA_DIR/hhsuite_CB_v2_new_pdb_list.csv}"
 WORKERS="${WORKERS:-${SLURM_CPUS_PER_TASK:-16}}"
+K="${K:-10}"   # block = 5 + K residues (K=4 for peptides >= 9 aa)
 
 module purge 2>/dev/null || true
 module load python/3.10.12-fasrc01 2>/dev/null || true
@@ -50,7 +51,8 @@ echo "[yangh5] beads=$(ls "$BEAD_DIR"/*_bead.csv 2>/dev/null | wc -l)  chimeric=
     --chim_dir "$CHIM_DIR" \
     --out_h5 "$OUT_H5" \
     --pdb_list "$PDB_LIST" \
-    --num_workers "$WORKERS"
+    --num_workers "$WORKERS" \
+    --k "$K"
 
 echo "[yangh5] done -> $OUT_H5"
 echo "[yangh5] chains: $("$PY" -c "import h5py; print(len(h5py.File('$OUT_H5','r').keys()))")"

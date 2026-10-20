@@ -39,6 +39,13 @@ PDB_LIST="${PDB_LIST:-$DATA_DIR/hhsuite_CB_v2_new_pdb_list.csv}"
 # for ordinary (non-ablation) training runs.
 VAL_PDB_LIST="${VAL_PDB_LIST:-}"
 EPOCHS="${EPOCHS:-200}"
+K="${K:-10}"                  # must match the h5 the model trains on
+SEQ_LEN="$((K + 4))"           # block = 5 + K positions, seq_len = block - 1
+# Profile-loss weight (Yang default 10), grad-clip (ribbon recipe 1.0; Yang uses 0) and
+# extra train_chimeric.py flags (e.g. "--seq_head masked_center"), for controlled comparisons.
+PROFILE_LAMDA="${PROFILE_LAMDA:-10}"
+GRAD_CLIP="${GRAD_CLIP:-1.0}"
+EXTRA_TRAIN="${EXTRA_TRAIN:-}"
 # Coords-head mixture counts. Yang/baseline use r=2, angle=3; raise them to test
 # whether the plateaued radius/angle NLL is limited by output-distribution
 # expressiveness (diagnostic lever #1). Eval must pass the SAME values.
@@ -61,7 +68,7 @@ cd "$SLURM_SUBMIT_DIR"; mkdir -p runs; nvidia-smi || true
 for f in "$PDB_H5" "$SEQ_H5" "$RAMA_H5" "$PDB_LIST"; do
     [[ -e "$f" ]] || { echo "[ribbon] ERROR: missing $f"; exit 1; }
 done
-echo "[ribbon] PDB_H5=$PDB_H5 SEQ_H5=$SEQ_H5 RAMA_H5=$RAMA_H5 EPOCHS=$EPOCHS MIXR=$MIXR MIXA=$MIXA MIXRAMA=$MIXRAMA RAMALAMDA=$RAMALAMDA VAL_PDB_LIST=${VAL_PDB_LIST:-<none>}"
+echo "[ribbon] PROFILE_LAMDA=$PROFILE_LAMDA GRAD_CLIP=$GRAD_CLIP EXTRA_TRAIN=$EXTRA_TRAIN PDB_H5=$PDB_H5 SEQ_H5=$SEQ_H5 RAMA_H5=$RAMA_H5 EPOCHS=$EPOCHS MIXR=$MIXR MIXA=$MIXA MIXRAMA=$MIXRAMA RAMALAMDA=$RAMALAMDA VAL_PDB_LIST=${VAL_PDB_LIST:-<none>}"
 
 # Yang-style sampling weights into the pdb_list (idempotent; needs struct+seq h5).
 # Skips if 'weight' column already present -- compute_weights.py writes IN
@@ -101,22 +108,23 @@ echo "[ribbon] angle_dist=$ANGLE_DIST r_dist=$R_DIST"
     --save_path runs \
     --data_flag "$PDB_LIST" \
     --seq_type residue --residue_type_num 20 --chimeric \
-    --seq_len 14 \
+    --seq_len "$SEQ_LEN" \
     --batch_size 1000 \
     --embed_size 32 --dim 128 --n_layers 4 --attn_heads 4 \
     --mixture_r "$MIXR" --mixture_angle "$MIXA" --mixture_seq 1 \
     --mixture_rama "$MIXRAMA" --coords_rama_loss_lamda "$RAMALAMDA" \
     --angle_dist "$ANGLE_DIST" --r_dist "$R_DIST" \
-    --grad_clip_norm 1.0 \
+    --grad_clip_norm "$GRAD_CLIP" \
     --smooth_gaussian --smooth_r 0.3 --smooth_angle 45 \
     --lr 5e-5 --n_warmup_steps 5000 --steps_decay_scale 30000 \
-    --coords_angle_loss_lamda 1 --profile_loss_lamda 10 \
+    --coords_angle_loss_lamda 1 --profile_loss_lamda "$PROFILE_LAMDA" \
     --use_position_weights --cen_seg_loss_lamda 1 --oth_seg_loss_lamda 3 \
     --log_interval 30 --save_interval 50 --num_workers 4 \
     --epochs "$EPOCHS" --total_num_samples 1000000 \
     --pdb_h5_path "$PDB_H5" \
     --seq_h5_path "$SEQ_H5" \
     --rama_h5_path "$RAMA_H5" \
-    "${VAL_ARGS[@]}"
+    "${VAL_ARGS[@]}" \
+    $EXTRA_TRAIN
 
 echo "[ribbon] finished exit=$?"
