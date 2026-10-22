@@ -177,6 +177,14 @@ def get_common_parser():
                              "chain-distance from the existing slot-index position embedding.")
     parser.add_argument("--seq_offset_max", type=int, default=64,
                         help="Clamp range for --use_seq_offset. Embedding table has 2*max+2 entries.")
+    parser.add_argument("--smooth_nbr", action='store_true', default=False,
+                        help="Continuous block energy (model/smooth_nbr.py): neighbour slots in "
+                             "sequence order with offset embeddings, soft top-k weights anchored at "
+                             "the k-th neighbour, log-weight attention bias, no start_id. "
+                             "Architecture flag: train and evaluate with the same value. "
+                             "Requires --seq_head masked_center.")
+    parser.add_argument("--smooth_tau", type=float, default=1.0,
+                        help="Switching width (Angstrom) for --smooth_nbr.")
 
     parser.add_argument("--use_dihedral", action='store_true', default=False,
                         help="Inject per-residue backbone dihedrals (phi, psi) as sin/cos 4-d input. "

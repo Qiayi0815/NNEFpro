@@ -62,12 +62,17 @@ class DatasetLocalGenCM(Dataset):
         self.use_dihedral = bool(getattr(args, 'use_dihedral', False))
         self.seq_offset_max = int(getattr(args, 'seq_offset_max', 64))
         self.esm_dim_in = int(getattr(args, 'esm_dim_in', 1280))
+        # --smooth_nbr needs block-local Cartesian coords + RAW sequence offsets
+        # (model/smooth_nbr.py builds the soft layout inside LocalEnergyCE).
+        self.smooth_nbr = bool(getattr(args, 'smooth_nbr', False))
+        if self.smooth_nbr and self.use_seq_offset:
+            raise ValueError('--smooth_nbr has its own offset embedding; drop --use_seq_offset')
         # Any extra feature => we return the 10-tuple extended form. When none
         # are enabled we keep returning the original 6-tuple so downstream
         # collate and trainer behavior are bit-identical to baseline.
         self._has_extras = (
             self.use_esm or self.use_cart_coords
-            or self.use_seq_offset or self.use_dihedral
+            or self.use_seq_offset or self.use_dihedral or self.smooth_nbr
         )
 
         if self.residue_type_num != 20:
@@ -329,12 +334,15 @@ class DatasetLocalGenCM(Dataset):
             esm_block = torch.zeros((L, self.esm_dim_in), dtype=torch.float)
 
         # (2) Block-local Cartesian (x, y, z) complementing spherical (r, θ, φ).
-        if not self.use_cart_coords:
+        if not (self.use_cart_coords or self.smooth_nbr):
             coords_cart = torch.zeros_like(coords)
 
         # (3) Signed chain offset relative to the central residue, clamped and
         #     shifted to a non-negative embedding index.
-        if self.use_seq_offset:
+        if self.smooth_nbr:
+            gn = group_num.astype(np.int64)
+            seq_offset = torch.from_numpy(gn - gn[0])  # raw; bucketed in the model
+        elif self.use_seq_offset:
             gn = group_num.astype(np.int64)
             offset = gn - gn[0]
             M = self.seq_offset_max

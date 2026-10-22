@@ -141,6 +141,9 @@ class ProteinBase:
     use_cart_coords = False
     use_seq_offset = False
     seq_offset_max = 64
+    # --smooth_nbr (model/smooth_nbr.py): LocalEnergyCE needs the block-local
+    # Cartesian coords and the RAW sequence offsets to build the soft layout.
+    smooth_nbr = False
     use_esm = False
     use_dihedral = False
     # 4-bead (N, CA, C, CB) dynamics: recompute (phi, psi) from the CURRENT
@@ -929,9 +932,11 @@ class Protein(ProteinBase):
         may be None when its flag is off or the corresponding payload is not
         available.
         """
-        coords_cart = coords_local_cart.clone() if self.use_cart_coords else None
+        coords_cart = coords_local_cart.clone() if (self.use_cart_coords or self.smooth_nbr) else None
         seq_offset = None
-        if self.use_seq_offset:
+        if self.smooth_nbr:
+            seq_offset = (g_local - g_local[:, 0:1]).to(torch.long)  # raw; bucketed in the model
+        elif self.use_seq_offset:
             M = int(self.seq_offset_max)
             # Central residue sits at index 0 of every block (see get_local_struct).
             offset = g_local - g_local[:, 0:1]

@@ -55,7 +55,7 @@ from paths import data_path, ensure_dir
 # Helpers shared with nnef/scripts/evaluate_decoys.py                         #
 # --------------------------------------------------------------------------- #
 
-_SUPPORTED_DECOY_SETS = ('3DRobot_set', 'casp11', 'casp13', 'casp14')
+_SUPPORTED_DECOY_SETS = ('3DRobot_set', 'casp11', 'casp13', 'casp14', 'casp14_full')
 
 
 def load_target_list(decoy_set):
@@ -69,7 +69,7 @@ def load_target_list(decoy_set):
         return pd.read_csv(data_path('decoys', decoy_set, 'pdb_no_missing_residue.csv'))['pdb'].values
     if decoy_set == 'casp11':
         return pd.read_csv(data_path('decoys', decoy_set, 'no_missing_residue.txt'))['pdb'].values
-    if decoy_set in ('casp13', 'casp14'):
+    if decoy_set in ('casp13', 'casp14', 'casp14_full'):
         return pd.read_csv(data_path('decoys', decoy_set, 'pdb_no_missing_residue.csv'))['pdb'].values
     raise ValueError(f'decoy_set must be one of {_SUPPORTED_DECOY_SETS}, got {decoy_set!r}')
 
@@ -84,7 +84,7 @@ def _load_decoy_list_df(pdb_id, decoy_set):
             data_path('decoys', decoy_set, pdb_id, 'list.txt'),
             header=None, names=['NAME'],
         )
-    if decoy_set in ('casp13', 'casp14'):
+    if decoy_set in ('casp13', 'casp14', 'casp14_full'):
         return pd.read_csv(data_path('decoys', decoy_set, pdb_id, 'list.csv'))
     raise ValueError(f'decoy_set must be one of {_SUPPORTED_DECOY_SETS}, got {decoy_set!r}')
 
@@ -93,7 +93,7 @@ def _decoy_id_for(decoy_name, decoy_set):
     """Decoy filenames differ between sets: CASP{13,14} use bare model ids
     (``T1053TS004_1``) while 3DRobot / CASP11 append ``.pdb`` which we strip
     to get the ``{decoy_id}_bead.csv`` lookup key."""
-    if decoy_set in ('casp13', 'casp14'):
+    if decoy_set in ('casp13', 'casp14', 'casp14_full'):
         return decoy_name
     return decoy_name[:-4]
 

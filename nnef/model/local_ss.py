@@ -6,6 +6,16 @@ import numpy as np
 import pandas as pd
 
 from paths import data_path
+from model.smooth_nbr import N_BUCKETS, key_bias_mask, offset_bucket, permute, smooth_layout
+
+try:  # torch >= 2.3
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    def _math_attention():
+        return sdpa_kernel(SDPBackend.MATH)
+except ImportError:  # pragma: no cover
+    def _math_attention():
+        return torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True)
 
 """
 Adds a Ramachandran (phi, psi) mixture head and loss.
@@ -77,6 +87,16 @@ class LocalTransformer(nn.Module):
             raise ValueError('seq_head/struct_cond_seq require --seq_type residue')
         if self.seq_head == 'masked_center':
             self.seq_mask_embed = nn.Parameter(torch.randn(1, 1, args.embed_size) * 0.02)
+        # smooth_nbr (model/smooth_nbr.py): slot-index position embeddings are
+        # replaced by sequence-offset buckets and attention keys carry log s_j.
+        self.smooth_nbr = bool(getattr(args, 'smooth_nbr', False))
+        self.n_heads = args.attn_heads
+        if self.smooth_nbr:
+            if self.seq_head != 'masked_center' or self.struct_cond_seq or self.use_seq_offset:
+                raise ValueError('--smooth_nbr requires --seq_head masked_center, '
+                                 'no --struct_cond_seq, no --use_seq_offset')
+            self.pos_x_bucket = nn.Embedding(N_BUCKETS, args.embed_size // 4)
+            self.pos_s_bucket = nn.Embedding(N_BUCKETS, args.embed_size // 4)
         if self.struct_cond_seq:
             self.aa_embedding_x = nn.Embedding(self.residue_type_num, args.embed_size)
             self.linear_x_aa = nn.Linear(2 * args.embed_size, args.dim)
@@ -163,6 +183,21 @@ class LocalTransformer(nn.Module):
         self._decoder = nn.TransformerDecoder(decoder_layer, args.n_layers)
         if self.struct_cond_seq:
             self._encoder_free = nn.TransformerEncoder(encoder_layer, args.n_layers // 2)
+        if self.smooth_nbr:
+            # Query stream (replaces _encoder2): the prediction for slot m comes
+            # from a query that knows only slot m's offset bucket and reads the
+            # content of slots < m (and the centre) through log(s) key biases.
+            # A plain causal stack predicts slot m+1 from slot m's residual
+            # stream, so a switched-off slot (s = 0) would still steer it.
+            self._query_dec = nn.TransformerDecoder(decoder_layer, args.n_layers // 2)
+            self.query_in = nn.Linear(args.embed_size // 4, args.dim)
+            L = args.seq_len + 1
+            qmask = torch.where(torch.ones(L, L).tril(-1).bool(), 0.0, float('-inf'))  # key j < query m
+            qmask[:, 0] = 0.0                                                 # centre always visible
+            self.register_buffer('query_mem_mask', qmask)
+            diag = torch.full((L, L), float('-inf'))
+            diag.fill_diagonal_(0.0)
+            self.register_buffer('query_self_mask', diag)
 
         # ---------------------- Output dimensions ----------------------
         self.connect_dim = 2
@@ -189,9 +224,19 @@ class LocalTransformer(nn.Module):
             nn.Linear(out_hidden, self.out_s_dim)
         )
 
-    def forward(self, seq, coords, start_id,
-                esm=None, coords_cart=None, seq_offset=None,
-                dihedral=None, seq_full=None):
+    def forward(self, *args, **kwargs):
+        # smooth_nbr passes per-sample float attention masks over 5+k slots; the
+        # memory-efficient CUDA kernel's backward rejects unaligned lengths
+        # ("LSE is not correctly aligned"), so use the math kernel (which also
+        # supports double backward).
+        if self.smooth_nbr:
+            with _math_attention():
+                return self._forward(*args, **kwargs)
+        return self._forward(*args, **kwargs)
+
+    def _forward(self, seq, coords, start_id,
+                 esm=None, coords_cart=None, seq_offset=None,
+                 dihedral=None, seq_full=None, nbr_s=None, nbr_bucket=None):
         if self.seq_head == 'masked_center':
             # All block identities, slot 0 replaced by a learned [MASK].
             seq_feature = self.aa_embedding(seq_full)                    # (N, L+1, E)
@@ -207,8 +252,12 @@ class LocalTransformer(nn.Module):
             seq_feature = torch.cat((seq_start_feature, seq_feature), dim=1)  # (N, L+1, E)
 
         start_id_feature = self.start_id_embed(start_id)
-        pos_x_feature = self.pos_x_embed.weight.expand((coords.size(0), -1, -1))
-        pos_s_feature = self.pos_s_embed.weight.expand((seq_feature.size(0), -1, -1))
+        if self.smooth_nbr:
+            pos_x_feature = self.pos_x_bucket(nbr_bucket)
+            pos_s_feature = self.pos_s_bucket(nbr_bucket)
+        else:
+            pos_x_feature = self.pos_x_embed.weight.expand((coords.size(0), -1, -1))
+            pos_s_feature = self.pos_s_embed.weight.expand((seq_feature.size(0), -1, -1))
 
         s_feature = torch.cat((seq_feature, pos_s_feature), -1)
         x_feature = torch.cat((coords, start_id_feature, pos_x_feature), -1)
@@ -253,15 +302,29 @@ class LocalTransformer(nn.Module):
         s_feature = s_feature.transpose(0, 1)  # (L, N, E)
         x_feature = x_feature.transpose(0, 1)  # (L, N, E)
 
-        code_x = self._encoder1(x_feature, mask=self.mask)
-        out_x = self._encoder2(code_x, mask=self.mask)
-        out_x = out_x.transpose(0, 1)  # (N, L, E)
+        enc_mask, mem_mask = self.mask, None
+        if self.smooth_nbr:
+            enc_mask = key_bias_mask(nbr_s, self.n_heads, causal=self.mask)
+            mem_mask = key_bias_mask(nbr_s, self.n_heads)
+        code_x = self._encoder1(x_feature, mask=enc_mask)
+        if self.smooth_nbr:
+            q = self.query_in(pos_x_feature).transpose(0, 1)               # (L, N, dim)
+            q_mem = key_bias_mask(nbr_s, self.n_heads, causal=self.query_mem_mask)
+            pred = self._query_dec(q, code_x, tgt_mask=self.query_self_mask, memory_mask=q_mem)
+            pred = pred.transpose(0, 1)                                    # pred[:, m] -> slot m
+            # Keep the caller's convention out_x[:, j] -> slot j+1 (last row unused).
+            out_x = torch.cat((pred[:, 1:], pred[:, :1]), dim=1)
+        else:
+            out_x = self._encoder2(code_x, mask=enc_mask)
+            out_x = out_x.transpose(0, 1)  # (N, L, E)
 
         memory = code_x
         if self.struct_cond_seq:
             memory = self._encoder_free(x_free.transpose(0, 1), mask=self.mask)
         tgt_mask = None if self.seq_head == 'masked_center' else self.mask
-        out_s = self._decoder(s_feature, memory, tgt_mask=tgt_mask)
+        if self.smooth_nbr:
+            tgt_mask = mem_mask
+        out_s = self._decoder(s_feature, memory, tgt_mask=tgt_mask, memory_mask=mem_mask)
         out_s = out_s.transpose(0, 1)  # (N, L, E)
 
         out_x = self.linear_out_x(out_x)
@@ -503,6 +566,9 @@ class LocalEnergyCE(nn.Module):
         self.count_once = (str(getattr(args, 'seq_head', 'causal')) == 'masked_center'
                            or bool(getattr(args, 'energy_profile_slot0_only', False)))
 
+        self.smooth_nbr = bool(getattr(args, 'smooth_nbr', False))
+        self.smooth_tau = float(getattr(args, 'smooth_tau', 1.0))
+
         if args.use_position_weights:
             position_weights = torch.ones((1, args.seq_len + 1))
             position_weights[:, 0:5] *= args.cen_seg_loss_lamda
@@ -516,6 +582,18 @@ class LocalEnergyCE(nn.Module):
                 esm=None, coords_cart=None, seq_offset=None,
                 dihedral=None):
         seq_len = seq.shape[-1]
+        nbr_s = nbr_bucket = None
+        if self.smooth_nbr:
+            # Soft layout (model/smooth_nbr.py): reorder neighbour slots by
+            # sequence, weight them by s_j; seq_offset arrives RAW here.
+            perm, nbr_s = smooth_layout(coords_cart, seq_offset, self.smooth_tau)
+            seq, coords = permute(seq, perm), permute(coords, perm)
+            rama, rama_mask = permute(rama, perm), permute(rama_mask, perm)
+            esm, coords_cart = permute(esm, perm), permute(coords_cart, perm)
+            dihedral = permute(dihedral, perm)
+            nbr_bucket = offset_bucket(permute(seq_offset, perm))
+            seq_offset = None
+            start_id = torch.zeros_like(start_id)
 
         input_seq = seq[:, :-1]
         input_coords = coords
@@ -527,12 +605,12 @@ class LocalEnergyCE(nn.Module):
         out_x, out_s = self.model(
             input_seq, input_coords, input_start_id,
             esm=esm, coords_cart=coords_cart, seq_offset=seq_offset,
-            dihedral=dihedral, seq_full=seq,
+            dihedral=dihedral, seq_full=seq, nbr_s=nbr_s, nbr_bucket=nbr_bucket,
         )
 
         # structure losses (r, angles, rama)
         loss_r, loss_angle, loss_rama = self.get_mixture_loss(out_x[:, :-1, :-2], target_coords,
-                                                              rama=rama, rama_mask=rama_mask)
+                                                              rama=rama, rama_mask=rama_mask, w=nbr_s)
 
         # sequence CE
         loss_seq = self.seq_loss(out_s.transpose(1, 2), target_seq)  # (N, L)
@@ -543,7 +621,7 @@ class LocalEnergyCE(nn.Module):
             loss_seq = loss_seq + loss_seq_ref
 
         # connectivity/start_id
-        if seq_len > 6:
+        if seq_len > 6 and not self.smooth_nbr:
             target_start_id = start_id[:, 6:]
             out_start_id = out_x[:, 5:-1, -2:].transpose(1, 2)
             loss_start_id = self.start_id_loss(out_start_id, target_start_id)
@@ -636,8 +714,16 @@ class LocalEnergyCE(nn.Module):
                 angle_pi, angle_mu1, angle_mu2, angle_sigma1, angle_sigma2, angle_corr,
                 rama_pi, rama_mu_phi, rama_mu_psi, rama_sigma_phi, rama_sigma_psi, rama_corr)
 
-    def get_mixture_loss(self, out, target_coords, rama=None, rama_mask=None):
+    def get_mixture_loss(self, out, target_coords, rama=None, rama_mask=None, w=None):
         # targets over L-1 positions (coords[:, 1:, :])
+        # w (N, L): smooth_nbr slot weights. Weighted SUMS over a fixed slot
+        # count (not means over present slots) keep the energy continuous.
+        wt = None if w is None else w[:, 1:]
+
+        def red(x, ww):
+            if ww is None:
+                return torch.mean(x)
+            return (x * ww).sum(-1).mean() / x.shape[-1]
         r, theta, phi = target_coords[:, :, 0:1], target_coords[:, :, 1:2], target_coords[:, :, 2:3]
 
         (r_pi, r_mu, r_sigma,
@@ -696,7 +782,7 @@ class LocalEnergyCE(nn.Module):
             loss_r = log_weighted_sum(pdf_r, r_pi)
         else:
             loss_r = log_weighted_sum(normal_1d(r, r_mu, r_sigma), r_pi)
-        loss_r = torch.mean(loss_r)
+        loss_r = red(loss_r, wt)
 
         # --- (theta, phi) angle loss ---
         if self.angle_dist == 'vmf':
@@ -714,7 +800,7 @@ class LocalEnergyCE(nn.Module):
             k_phi = sigma_to_kappa(angle_sigma2)
             loss_angle2 = vonmises_1d(phi_rep[:, 1], angle_mu2[:, 1], k_phi[:, 1])
             loss_angle2 = log_weighted_sum(loss_angle2, angle_pi[:, 1])
-            loss_angle = torch.mean(loss_angle1) + torch.mean(loss_angle2)
+            loss_angle = red(loss_angle1, None if wt is None else wt[:, 2:]) + torch.mean(loss_angle2)
         elif self.angle_dist == 'vonmises':
             # theta (polar, non-circular) stays Gaussian; phi (azimuthal, circular)
             # uses von Mises. Independent product; correlation term (rho) dropped.
@@ -725,7 +811,7 @@ class LocalEnergyCE(nn.Module):
             loss_angle1 = log_weighted_sum(pdf_theta * pdf_phi, angle_pi[:, 2:])
             loss_angle2 = vonmises_1d(phi_rep[:, 1], angle_mu2[:, 1], k_phi[:, 1])
             loss_angle2 = log_weighted_sum(loss_angle2, angle_pi[:, 1])
-            loss_angle = torch.mean(loss_angle1) + torch.mean(loss_angle2)
+            loss_angle = red(loss_angle1, None if wt is None else wt[:, 2:]) + torch.mean(loss_angle2)
         else:
             # legacy wrapped-Gaussian (wrap phi to nearest mu)
             phi_rep = phi.repeat([1, 1, self.m_angle])
@@ -735,7 +821,7 @@ class LocalEnergyCE(nn.Module):
             loss_angle1 = log_weighted_sum(loss_angle1, angle_pi[:, 2:])
             loss_angle2 = normal_1d(phi_w[:, 1], angle_mu2[:, 1], angle_sigma2[:, 1])
             loss_angle2 = log_weighted_sum(loss_angle2, angle_pi[:, 1])
-            loss_angle = torch.mean(loss_angle1) + torch.mean(loss_angle2)
+            loss_angle = red(loss_angle1, None if wt is None else wt[:, 2:]) + torch.mean(loss_angle2)
 
         # --- Ramachandran loss alignment (FIX) ---
         # coords targets are length L-1; align Rama to the same by dropping the first position
@@ -743,6 +829,8 @@ class LocalEnergyCE(nn.Module):
             rama = rama[:, 1:, :]  # (N, L-1, 2)
         if rama_mask is not None:
             rama_mask = rama_mask[:, 1:]  # (N, L-1)
+            if wt is not None:
+                rama_mask = rama_mask * wt
 
         # --- Rama loss (skip for pre-rama checkpoints: m_rama == 0) ---
         if rama is not None and self.m_rama > 0:
