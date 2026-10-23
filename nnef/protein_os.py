@@ -154,6 +154,10 @@ class ProteinBase:
     # blocks/order/start_id; equivalence-tested in scripts/test_v2_differentiable.py).
     # The reference version loops over residues with pandas -> far too slow for MD.
     v2_fast = False
+    # Blocks centred on the first/last two residues (ribbon's terminal blocks,
+    # with filler slots). False drops them as Yang's builder does -> ablation
+    # that isolates the terminal blocks from the frame / rama changes.
+    terminal_blocks = True
 
     def __init__(self):
         df = pd.read_csv(data_path('aa_freq_alpha-beta-train.csv'))
@@ -522,6 +526,8 @@ class Protein(ProteinBase):
         win = (rows[:, None] + offs).clamp(0, N - 1)                      # (N,5)
         win_ok = (gid[win] == gid[:, None] + offs).all(dim=1)
         valid = terminal | win_ok
+        if not ProteinBase.terminal_blocks:
+            valid = valid & ~terminal
 
         with torch.no_grad():
             D = torch.cdist(CB.detach(), CB.detach())                         # (N,N)
@@ -678,6 +684,8 @@ class Protein(ProteinBase):
             dist_glob = torch.norm(CB - CB_cen, dim=-1)
 
             is_terminal = (gc in first_two) or (gc in last_two)
+            if is_terminal and not ProteinBase.terminal_blocks:
+                continue
 
             filler_flags = np.zeros(block_size, dtype=bool)
             if is_terminal:
@@ -1055,6 +1063,32 @@ class Protein(ProteinBase):
         if return_terms:
             return energy, terms
         return energy
+
+    def get_block_energies(self, energy_fun):
+        """Per-block energies in ONE batched pass: (E (B,), g_local (B, 5+k)).
+
+        g_local[:, 0] is each block's centre (row index into this chain); a
+        residue's other memberships are the remaining columns. Terms are the
+        trained per-block NLL (no residue_sum scaling, profile_weight applied).
+        """
+        profile_local, coords_local, start_id, res_counts, g_local = self.get_local_struct()
+        coords_cart, seq_offset, esm_local, dihedral_local = self._build_extras(
+            coords_local, g_local)
+        rama_local, rama_mask_local = self._gather_rama_local(g_local)
+        coords_local = self._local_cartesian_to_radian(coords_local)
+        ce = energy_fun.energy_fn
+        prev = (ce.per_block, energy_fun.residue_sum, energy_fun.return_loss_terms)
+        ce.per_block, energy_fun.residue_sum, energy_fun.return_loss_terms = True, False, False
+        try:
+            energy = energy_fun.forward(
+                profile_local, coords_local, start_id, res_counts,
+                rama=rama_local, rama_mask=rama_mask_local,
+                coords_cart=coords_cart, seq_offset=seq_offset, esm=esm_local,
+                dihedral=dihedral_local,
+            )
+        finally:
+            ce.per_block, energy_fun.residue_sum, energy_fun.return_loss_terms = prev
+        return energy, g_local
 
     def get_residue_energy(self, energy_fun):
         # seq & profile have add up to seq_feature

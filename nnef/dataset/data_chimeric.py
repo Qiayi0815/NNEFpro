@@ -122,10 +122,20 @@ class DatasetLocalGenCM(Dataset):
         self.seq_dict = {}
         self.rama_dict = {}  # NEW
         self.esm_dict = {}   # NEW
+        # --terminal_blocks off: sample only blocks whose centre is NOT one of the
+        # chain's first/last two residues (Yang's coverage; ablation of ribbon's
+        # terminal blocks). None = all blocks.
+        self.terminal_blocks = getattr(args, 'terminal_blocks', 'on') != 'off'
+        self.block_idx_dict = {}
 
         for pdb in tqdm(self.pdb_list):
             data_pdb = hh_data_pdb[pdb]
             self.group_num_dict[pdb] = data_pdb['group_num'][()]
+            if not self.terminal_blocks:
+                cen = self.group_num_dict[pdb][:, 0]
+                u = np.unique(cen)
+                term = np.isin(cen, np.concatenate([u[:2], u[-2:]]))
+                self.block_idx_dict[pdb] = np.nonzero(~term)[0]
             # per-chain sequence-registration shift (0 for h5 built before the fix)
             self.seq_shift_dict[pdb] = int(data_pdb['seq_shift'][0]) if 'seq_shift' in data_pdb else 0
             self.coords_dict[pdb] = data_pdb['coords'][()]
@@ -193,7 +203,13 @@ class DatasetLocalGenCM(Dataset):
 
         # random select one of the L local structures
         group_num_n = self.group_num_dict[pdb]
-        i = torch.randint(0, group_num_n.shape[0], (1,))[0]
+        if self.terminal_blocks:
+            i = torch.randint(0, group_num_n.shape[0], (1,))[0]
+        else:
+            allowed = self.block_idx_dict[pdb]
+            if allowed.size == 0:
+                return None
+            i = int(allowed[torch.randint(0, allowed.size, (1,))[0]])
         group_num = group_num_n[i]
         # 1-based PDB numbering -> 0-based index into the chimeric sequence,
         # plus the chain's registration shift (local_extractor_v2 'seq_shift').

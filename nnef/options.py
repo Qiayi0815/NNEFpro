@@ -183,6 +183,10 @@ def get_common_parser():
                              "the k-th neighbour, log-weight attention bias, no start_id. "
                              "Architecture flag: train and evaluate with the same value. "
                              "Requires --seq_head masked_center.")
+    parser.add_argument("--terminal_blocks", type=str, default='on', choices=['on', 'off'],
+                        help="v2 frame: 'off' drops blocks centred on the first/last two residues "
+                             "(Yang's coverage) at inference and, in training, skips terminal "
+                             "(filler-bearing) blocks. Ablation of ribbon's terminal blocks.")
     parser.add_argument("--smooth_tau", type=float, default=1.0,
                         help="Switching width (Angstrom) for --smooth_nbr.")
 

@@ -568,6 +568,9 @@ class LocalEnergyCE(nn.Module):
 
         self.smooth_nbr = bool(getattr(args, 'smooth_nbr', False))
         self.smooth_tau = float(getattr(args, 'smooth_tau', 1.0))
+        # Inference-only: return every term per block (N,) instead of the batch
+        # mean (Protein.get_block_energies, per-residue analyses).
+        self.per_block = False
 
         if args.use_position_weights:
             position_weights = torch.ones((1, args.seq_len + 1))
@@ -628,7 +631,7 @@ class LocalEnergyCE(nn.Module):
             if self.position_weights is not None:
                 loss_start_id = loss_start_id * self.position_weights[:, 6:]
             loss_start_id = torch.sum(loss_start_id, dim=-1)
-            if self.reduction != 'keep_batch_dim':
+            if self.reduction != 'keep_batch_dim' and not self.per_block:
                 loss_start_id = torch.mean(loss_start_id)
         else:
             loss_start_id = torch.tensor([0], dtype=torch.float, device=seq.device)
@@ -646,7 +649,7 @@ class LocalEnergyCE(nn.Module):
             # identity terms, which re-count buried residues in many blocks.
             loss_seq = loss_seq[:, :5]
         loss_seq = torch.sum(loss_seq, dim=-1)
-        if self.reduction != 'keep_batch_dim':
+        if self.reduction != 'keep_batch_dim' and not self.per_block:
             loss_seq = torch.mean(loss_seq)
 
         # weights
@@ -721,9 +724,14 @@ class LocalEnergyCE(nn.Module):
         wt = None if w is None else w[:, 1:]
 
         def red(x, ww):
+            if self.per_block:
+                return x.mean(-1) if ww is None else (x * ww).sum(-1) / x.shape[-1]
             if ww is None:
                 return torch.mean(x)
             return (x * ww).sum(-1).mean() / x.shape[-1]
+
+        def m1(x):  # (N,) per-block term
+            return x if self.per_block else torch.mean(x)
         r, theta, phi = target_coords[:, :, 0:1], target_coords[:, :, 1:2], target_coords[:, :, 2:3]
 
         (r_pi, r_mu, r_sigma,
@@ -800,7 +808,7 @@ class LocalEnergyCE(nn.Module):
             k_phi = sigma_to_kappa(angle_sigma2)
             loss_angle2 = vonmises_1d(phi_rep[:, 1], angle_mu2[:, 1], k_phi[:, 1])
             loss_angle2 = log_weighted_sum(loss_angle2, angle_pi[:, 1])
-            loss_angle = red(loss_angle1, None if wt is None else wt[:, 2:]) + torch.mean(loss_angle2)
+            loss_angle = red(loss_angle1, None if wt is None else wt[:, 2:]) + m1(loss_angle2)
         elif self.angle_dist == 'vonmises':
             # theta (polar, non-circular) stays Gaussian; phi (azimuthal, circular)
             # uses von Mises. Independent product; correlation term (rho) dropped.
@@ -811,7 +819,7 @@ class LocalEnergyCE(nn.Module):
             loss_angle1 = log_weighted_sum(pdf_theta * pdf_phi, angle_pi[:, 2:])
             loss_angle2 = vonmises_1d(phi_rep[:, 1], angle_mu2[:, 1], k_phi[:, 1])
             loss_angle2 = log_weighted_sum(loss_angle2, angle_pi[:, 1])
-            loss_angle = red(loss_angle1, None if wt is None else wt[:, 2:]) + torch.mean(loss_angle2)
+            loss_angle = red(loss_angle1, None if wt is None else wt[:, 2:]) + m1(loss_angle2)
         else:
             # legacy wrapped-Gaussian (wrap phi to nearest mu)
             phi_rep = phi.repeat([1, 1, self.m_angle])
@@ -821,7 +829,7 @@ class LocalEnergyCE(nn.Module):
             loss_angle1 = log_weighted_sum(loss_angle1, angle_pi[:, 2:])
             loss_angle2 = normal_1d(phi_w[:, 1], angle_mu2[:, 1], angle_sigma2[:, 1])
             loss_angle2 = log_weighted_sum(loss_angle2, angle_pi[:, 1])
-            loss_angle = red(loss_angle1, None if wt is None else wt[:, 2:]) + torch.mean(loss_angle2)
+            loss_angle = red(loss_angle1, None if wt is None else wt[:, 2:]) + m1(loss_angle2)
 
         # --- Ramachandran loss alignment (FIX) ---
         # coords targets are length L-1; align Rama to the same by dropping the first position
@@ -858,9 +866,9 @@ class LocalEnergyCE(nn.Module):
                 rama_nll = rama_nll * rama_mask
                 denom = torch.clamp(rama_mask.sum(dim=-1), min=1.0)
                 rama_nll = rama_nll.sum(dim=-1) / denom
-                loss_rama = rama_nll.mean()
+                loss_rama = m1(rama_nll)
             else:
-                loss_rama = rama_nll.mean()
+                loss_rama = m1(rama_nll.mean(-1))
         else:
             loss_rama = torch.tensor(0.0, device=out.device)
 
