@@ -187,6 +187,10 @@ def get_common_parser():
                         help="v2 frame: 'off' drops blocks centred on the first/last two residues "
                              "(Yang's coverage) at inference and, in training, skips terminal "
                              "(filler-bearing) blocks. Ablation of ribbon's terminal blocks.")
+    parser.add_argument("--terminal_oversample", type=float, default=0.0,
+                        help="Training: probability of drawing the sampled block from the chain's "
+                             "terminal blocks (centre among the first/last two residues; ~1.7%% of "
+                             "blocks otherwise). 0 = uniform over blocks (default).")
     parser.add_argument("--smooth_tau", type=float, default=1.0,
                         help="Switching width (Angstrom) for --smooth_nbr.")
 

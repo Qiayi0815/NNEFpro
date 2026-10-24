@@ -127,15 +127,19 @@ class DatasetLocalGenCM(Dataset):
         # terminal blocks). None = all blocks.
         self.terminal_blocks = getattr(args, 'terminal_blocks', 'on') != 'off'
         self.block_idx_dict = {}
+        # --terminal_oversample p: draw from the terminal blocks with probability p
+        self.terminal_oversample = float(getattr(args, 'terminal_oversample', 0.0))
+        self.term_idx_dict = {}
 
         for pdb in tqdm(self.pdb_list):
             data_pdb = hh_data_pdb[pdb]
             self.group_num_dict[pdb] = data_pdb['group_num'][()]
-            if not self.terminal_blocks:
+            if not self.terminal_blocks or self.terminal_oversample > 0:
                 cen = self.group_num_dict[pdb][:, 0]
                 u = np.unique(cen)
                 term = np.isin(cen, np.concatenate([u[:2], u[-2:]]))
                 self.block_idx_dict[pdb] = np.nonzero(~term)[0]
+                self.term_idx_dict[pdb] = np.nonzero(term)[0]
             # per-chain sequence-registration shift (0 for h5 built before the fix)
             self.seq_shift_dict[pdb] = int(data_pdb['seq_shift'][0]) if 'seq_shift' in data_pdb else 0
             self.coords_dict[pdb] = data_pdb['coords'][()]
@@ -203,7 +207,11 @@ class DatasetLocalGenCM(Dataset):
 
         # random select one of the L local structures
         group_num_n = self.group_num_dict[pdb]
-        if self.terminal_blocks:
+        if (self.terminal_blocks and self.terminal_oversample > 0 and self.term_idx_dict[pdb].size
+                and float(torch.rand(())) < self.terminal_oversample):
+            tb = self.term_idx_dict[pdb]
+            i = int(tb[torch.randint(0, tb.size, (1,))[0]])
+        elif self.terminal_blocks:
             i = torch.randint(0, group_num_n.shape[0], (1,))[0]
         else:
             allowed = self.block_idx_dict[pdb]
