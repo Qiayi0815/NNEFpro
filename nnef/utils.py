@@ -93,6 +93,7 @@ def test_setup(args):
     ProteinBase.seq_offset_max = int(getattr(args, 'seq_offset_max', 64))
     ProteinBase.smooth_nbr = bool(getattr(args, 'smooth_nbr', False))
     ProteinBase.terminal_blocks = getattr(args, 'terminal_blocks', 'on') != 'off'
+    ProteinBase.terminal_only = getattr(args, 'terminal_blocks', 'on') == 'only'
     ProteinBase.use_esm = bool(getattr(args, 'use_esm', False))
     ProteinBase.use_dihedral = bool(getattr(args, 'use_dihedral', False))
     ProteinBase.use_local_frame_v2 = not bool(

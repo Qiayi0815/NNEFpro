@@ -158,6 +158,9 @@ class ProteinBase:
     # with filler slots). False drops them as Yang's builder does -> ablation
     # that isolates the terminal blocks from the frame / rama changes.
     terminal_blocks = True
+    # True keeps ONLY the terminal blocks (hybrid energies: a second model scores
+    # the chain ends while the first scores the interior).
+    terminal_only = False
 
     def __init__(self):
         df = pd.read_csv(data_path('aa_freq_alpha-beta-train.csv'))
@@ -528,6 +531,8 @@ class Protein(ProteinBase):
         valid = terminal | win_ok
         if not ProteinBase.terminal_blocks:
             valid = valid & ~terminal
+        if ProteinBase.terminal_only:
+            valid = valid & terminal
 
         with torch.no_grad():
             D = torch.cdist(CB.detach(), CB.detach())                         # (N,N)
@@ -685,6 +690,8 @@ class Protein(ProteinBase):
 
             is_terminal = (gc in first_two) or (gc in last_two)
             if is_terminal and not ProteinBase.terminal_blocks:
+                continue
+            if ProteinBase.terminal_only and not is_terminal:
                 continue
 
             filler_flags = np.zeros(block_size, dtype=bool)
