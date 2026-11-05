@@ -332,6 +332,26 @@ def load_protein_bead(bead_csv, mode, device):
     return seq, coords, profile
 
 
+def ideal_cb_on():
+    """NNEF_CB=ideal: every non-Gly CB is rebuilt from N/CA/C (for models trained on ideal CB,
+    and for scoring any model without its sub-Angstrom CB placement)."""
+    return os.environ.get('NNEF_CB') == 'ideal'
+
+
+def ideal_cb(x, seq):
+    """x (4, L, 3) N/CA/C/CB (numpy or tensor), seq residue names -> CB (L, 3); Gly keeps its CB.
+    Same coefficients as data_prep_scripts/build_cbideal_h5.py (training data)."""
+    gly = np.isin(np.char.upper(np.asarray(seq, dtype=str)), ['G', 'GLY'])
+    b, c = x[1] - x[0], x[2] - x[1]
+    if torch.is_tensor(x):
+        a = torch.linalg.cross(b, c)
+        cb = -0.58273431 * a + 0.56802827 * b - 0.54067466 * c + x[1]
+        return torch.where(torch.as_tensor(gly, device=x.device)[:, None], x[3], cb)
+    a = np.cross(b, c)
+    cb = -0.58273431 * a + 0.56802827 * b - 0.54067466 * c + x[1]
+    return np.where(gly[:, None], x[3], cb)
+
+
 def load_protein_decoy(pdb_id, decoy_id, mode, device, args):
     amino_acids = pd.read_csv(data_path('amino_acids.csv'))
     vocab = {x: y - 1 for x, y in zip(amino_acids.AA, amino_acids.idx)}
@@ -361,6 +381,9 @@ def load_protein_decoy(pdb_id, decoy_id, mode, device, args):
             coords = df_beads[['x', 'y', 'z']].values
     elif mode == 'CB':
         coords = df_beads[['xcb', 'ycb', 'zcb']].values
+        if ideal_cb_on():
+            x = np.stack([df_beads[[f'x{a}', f'y{a}', f'z{a}']].values for a in ('n', 'ca', 'c', 'cb')]).astype(float)
+            coords = ideal_cb(x, seq)
     elif mode == 'CAS':
         coords = (df_beads[['xca', 'yca', 'zca']].values + df_beads[['xs', 'ys', 'zs']].values) / 2
     else:
