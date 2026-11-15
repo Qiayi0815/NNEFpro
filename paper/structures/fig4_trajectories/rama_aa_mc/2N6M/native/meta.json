@@ -1,0 +1,64 @@
+{
+  "target": "2N6M",
+  "sampler": "torsion_remc",
+  "L": 21,
+  "n_rep": 5,
+  "kT": [
+    0.54,
+    1.0,
+    1.739,
+    2.675,
+    4.0
+  ],
+  "n_sweeps": 2500,
+  "warmup_sweeps": 50,
+  "steps_per_sweep": 40,
+  "swap_every": 1000000000,
+  "hs_dmin": 3.0,
+  "start_extended": false,
+  "start_bead": null,
+  "native_bead": "nnef/data/decoys/pep_nmr/2N6M/2N6M_native_bead.csv",
+  "load_exp": "runs/cbrib_k10_s42_56982226",
+  "seed": 0,
+  "energy_native": 111.44643800061544,
+  "acceptance_small": [
+    0.39818453865336656,
+    0.4199792878196447,
+    0.41598842466992225,
+    0.5697901759619455,
+    0.6847322142286171
+  ],
+  "acceptance_shear": [
+    0.40136340852130326,
+    0.41353338153771996,
+    0.4100400087581361,
+    0.45251751443824795,
+    0.5967974379503603
+  ],
+  "sigma_small_deg": [
+    16.61031512347363,
+    31.772829959867007,
+    87.7026569200466,
+    90.0,
+    90.0
+  ],
+  "sigma_shear_deg": [
+    9.838359248454553,
+    19.21681416852356,
+    45.51714715765244,
+    85.1739839040501,
+    90.0
+  ],
+  "swap_rate": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "n_clash_rejected": 16216,
+  "elapsed_sec": 285.32932686805725,
+  "warmup_sec": 4.673813104629517,
+  "sec_per_step": 0.0027973463418436983,
+  "n_sweeps_done": 2500,
+  "complete": true
+}

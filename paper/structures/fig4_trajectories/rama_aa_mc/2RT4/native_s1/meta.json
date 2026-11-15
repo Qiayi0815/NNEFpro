@@ -1,0 +1,64 @@
+{
+  "target": "2RT4",
+  "sampler": "torsion_remc",
+  "L": 25,
+  "n_rep": 5,
+  "kT": [
+    0.54,
+    1.0,
+    1.739,
+    2.675,
+    4.0
+  ],
+  "n_sweeps": 2500,
+  "warmup_sweeps": 50,
+  "steps_per_sweep": 48,
+  "swap_every": 1000000000,
+  "hs_dmin": 3.0,
+  "start_extended": false,
+  "start_bead": null,
+  "native_bead": "nnef/data/decoys/pep_nmr/2RT4/2RT4_native_bead.csv",
+  "load_exp": "runs/cbrib_k10_s42_56982226",
+  "seed": 1,
+  "energy_native": 166.4568640888035,
+  "acceptance_small": [
+    0.4239034393078039,
+    0.32623430128247727,
+    0.4210948868483115,
+    0.5668488403092509,
+    0.6835775019628151
+  ],
+  "acceptance_shear": [
+    0.37715980472199545,
+    0.31646712594475285,
+    0.33990998621560126,
+    0.4486363030141371,
+    0.6056504315147081
+  ],
+  "sigma_small_deg": [
+    22.508703754655,
+    55.46979155401648,
+    85.1142572382121,
+    90.0,
+    90.0
+  ],
+  "sigma_shear_deg": [
+    15.444874206641389,
+    33.04996324578184,
+    63.76978167108691,
+    88.51243084394557,
+    90.0
+  ],
+  "swap_rate": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "n_clash_rejected": 24119,
+  "elapsed_sec": 333.72031140327454,
+  "warmup_sec": 5.495574712753296,
+  "sec_per_step": 0.002726473132379694,
+  "n_sweeps_done": 2500,
+  "complete": true
+}

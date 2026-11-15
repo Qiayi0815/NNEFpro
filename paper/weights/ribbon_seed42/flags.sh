@@ -1,0 +1,3 @@
+# cb42 model flags (paper model). Source this, then use $FLAGS.
+FLAGS="--load_exp runs/cbrib_k10_s42_56982226 --device cpu --mode CB --mixture_seq 1 --seq_len 14 --seq_type residue --residue_type_num 20 --embed_size 32 --dim 128 --n_layers 4 --attn_heads 4 --mixture_r 2 --mixture_angle 3 --smooth_gaussian --smooth_r 0.3 --smooth_angle 45 --coords_angle_loss_lamda 1 --profile_loss_lamda 1 --coords_rama_loss_lamda 1 --use_position_weights --cen_seg_loss_lamda 1 --oth_seg_loss_lamda 3 --mixture_rama 10 --seq_head masked_center --smooth_nbr --smooth_tau 1.0 --energy_profile_weight 10 --struct_dist_cutoff 1000"
+export NNEF_CB=ideal

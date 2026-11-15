@@ -1,0 +1,16 @@
+{
+  "pdb": "2RT4",
+  "ns": 100.0,
+  "equil_ns": 1.0,
+  "record_ps": 10.0,
+  "seed": 1,
+  "temperature_K": 300,
+  "forcefield": "amber14-all.xml (ff14SB) + implicit/gbn2.xml",
+  "integrator": "LangevinMiddle 1/ps 2fs HBonds",
+  "platform": "CUDA",
+  "n_atoms": 372,
+  "L": 25,
+  "elapsed_sec": 20171.361676216125,
+  "chain": "A",
+  "target_model": 19
+}

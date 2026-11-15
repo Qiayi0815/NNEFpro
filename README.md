@@ -80,3 +80,8 @@ for examples:
 
 
 
+
+### Paper release (RIBBON, an energy function for peptides)
+
+The weights of the final model, the training and holdout lists, benchmark identifiers, the preregistration,
+Amber inputs, run commands, structures and metric tables are in [`paper/`](paper/README.md).

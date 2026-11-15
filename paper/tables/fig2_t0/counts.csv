@@ -1,0 +1,6 @@
+model,set,n_false,n_total
+exp1,peptide_dev,122,206
+final,peptide_dev,1,206
+final,peptide_heldout,0,112
+final,protein,0,196
+exp1,protein,6,196
