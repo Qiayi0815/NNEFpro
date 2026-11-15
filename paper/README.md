@@ -58,6 +58,7 @@ are under `paper/structures/<set>/<ID>/`.
 | `structures/fig4_trajectories/` | Cα trajectories of 2N6M, 1E0N and 2RT4 (see below) | Fig 4 |
 | `tables/fig2_t0/` | `counts.csv`, `per_target.csv`, `per_position.csv` (model `final` = RIBBON, `exp1` = original NNEF; sets `peptide_dev`, `peptide_heldout`, `protein`) | Fig 2 |
 | `tables/fig2_nmr_bundle/` | NMR ensemble spread per peptide and per position; `t0_clash.csv` = closest non-neighbour distances | Fig 2 |
+| `tables/fig3/fig3d_helix_set.csv`, `analysis/fig3d_check.py` | per-peptide check of the ideal-helix test: whether the ideal helix entered RIBBON's comparison (`helix_in`, `ncommon`) and whether it was the lowest-energy candidate; the 194 peptides of Fig 3d are the non-helical ones with L ≥ 15, `helix_in` true and `ncommon` > 0 | Fig 3d |
 | `tables/fig3/shuffle_per_target.csv` | sequence-shuffle test per peptide (model `cb42` = RIBBON) | Fig 3 |
 | `tables/fig3/pep_compare_per_target.csv` | ranking per peptide for RIBBON (`cb42_w10`), RW+ and Ramachandran-only | Fig 3 |
 | `tables/fig3/fig3d_check.csv` | helix test per peptide | Fig 3d |
